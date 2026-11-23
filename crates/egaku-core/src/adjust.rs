@@ -51,7 +51,10 @@ impl Filter for Gradient {
         let (ox, oy) = (c.x as f32 * TILE as f32, c.y as f32 * TILE as f32);
         for y in 0..TILE {
             for x in 0..TILE {
-                let (px, py) = (ox + x as f32 + 0.5 - self.from.0, oy + y as f32 + 0.5 - self.from.1);
+                let (px, py) = (
+                    ox + x as f32 + 0.5 - self.from.0,
+                    oy + y as f32 + 0.5 - self.from.1,
+                );
                 let t = if self.radial {
                     (px * px + py * py).sqrt() / len
                 } else {
@@ -59,7 +62,10 @@ impl Filter for Gradient {
                 }
                 .clamp(0.0, 1.0);
                 // A 4×4 ordered dither hides banding in long, subtle ramps.
-                const B: [f32; 16] = [0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0];
+                const B: [f32; 16] = [
+                    0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0,
+                    13.0, 5.0,
+                ];
                 let d = B[(y % 4) * 4 + x % 4] / 16.0 - 0.47;
                 let mut q = [0u8; 4];
                 for ch in 0..4 {
@@ -71,7 +77,9 @@ impl Filter for Gradient {
                 g.px[y * TILE + x] = q;
             }
         }
-        let mut out = src.get(c).map_or_else(|| Tile::filled([0; 4]), |t| (**t).clone());
+        let mut out = src
+            .get(c)
+            .map_or_else(|| Tile::filled([0; 4]), |t| (**t).clone());
         crate::blend::blend_tile(&mut out, &g, 255, crate::blend::BlendMode::Normal);
         if out.is_empty() { None } else { Some(out) }
     }
@@ -81,27 +89,58 @@ impl Filter for Gradient {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Adjustment {
     /// Both -1..=1.
-    BrightnessContrast { brightness: f32, contrast: f32 },
+    BrightnessContrast {
+        brightness: f32,
+        contrast: f32,
+    },
     /// Hue in degrees, saturation and lightness -1..=1.
-    HueSaturation { hue: f32, saturation: f32, lightness: f32 },
+    HueSaturation {
+        hue: f32,
+        saturation: f32,
+        lightness: f32,
+    },
     /// Input black/white points and output range in 0..=1, gamma > 0.
-    Levels { black: f32, white: f32, gamma: f32, out_black: f32, out_white: f32 },
+    Levels {
+        black: f32,
+        white: f32,
+        gamma: f32,
+        out_black: f32,
+        out_white: f32,
+    },
     /// White balance and vibrance, -1..=1.
-    Color { temperature: f32, tint: f32, vibrance: f32 },
+    Color {
+        temperature: f32,
+        tint: f32,
+        vibrance: f32,
+    },
     Invert,
     Desaturate,
     /// Pixels brighter than the level become white, others black.
-    Threshold { level: f32 },
+    Threshold {
+        level: f32,
+    },
     /// Number of tones per channel.
-    Posterize { levels: u32 },
+    Posterize {
+        levels: u32,
+    },
     /// Gaussian-like blur radius in pixels.
-    Blur { radius: f32 },
+    Blur {
+        radius: f32,
+    },
     /// Unsharp mask.
-    Sharpen { amount: f32, radius: f32 },
+    Sharpen {
+        amount: f32,
+        radius: f32,
+    },
     /// Film grain, 0..=1.
-    Noise { amount: f32, mono: bool },
+    Noise {
+        amount: f32,
+        mono: bool,
+    },
     /// Block size in pixels.
-    Pixelate { size: u32 },
+    Pixelate {
+        size: u32,
+    },
 }
 
 impl Adjustment {
@@ -323,7 +362,12 @@ impl Filter for Adjustment {
                     continue;
                 }
                 let u = unpremultiply(*p);
-                *p = premultiply([lut[u[0] as usize], lut[u[1] as usize], lut[u[2] as usize], u[3]]);
+                *p = premultiply([
+                    lut[u[0] as usize],
+                    lut[u[1] as usize],
+                    lut[u[2] as usize],
+                    u[3],
+                ]);
             }
         } else {
             let (ox, oy) = (c.x as i64 * TILE as i64, c.y as i64 * TILE as i64);
@@ -355,7 +399,10 @@ fn blur_margin(radius: f32) -> u32 {
 /// Reads a padded square around a tile as f32 premultiplied channels.
 fn gather(src: &TileGrid, c: TileCoord, m: usize) -> (Vec<[f32; 4]>, usize) {
     let n = TILE + 2 * m;
-    let (ox, oy) = (c.x as i64 * TILE as i64 - m as i64, c.y as i64 * TILE as i64 - m as i64);
+    let (ox, oy) = (
+        c.x as i64 * TILE as i64 - m as i64,
+        c.y as i64 * TILE as i64 - m as i64,
+    );
     let mut buf = vec![[0f32; 4]; n * n];
     for y in 0..n {
         for x in 0..n {

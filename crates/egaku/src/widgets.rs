@@ -1,8 +1,8 @@
 //! Small custom widgets shared by the panels.
 
 use eframe::egui::{
-    self, Align2, Color32, CursorIcon, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2,
-    pos2, vec2,
+    self, Align2, Color32, CursorIcon, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2, pos2,
+    vec2,
 };
 
 use crate::theme;
@@ -37,7 +37,9 @@ pub fn li(text: &str, icon: &str) -> egui::WidgetText {
 
 /// Just an icon, as widget text.
 pub fn ic(icon: &str) -> egui::WidgetText {
-    egui::RichText::new(icon).font(theme::icon_font(14.0)).into()
+    egui::RichText::new(icon)
+        .font(theme::icon_font(14.0))
+        .into()
 }
 
 /// A square, frameless icon button.
@@ -45,7 +47,13 @@ pub fn icon_button(ui: &mut Ui, icon: &str, size: f32, selected: bool, tip: &str
     icon_button_sized(ui, icon, vec2(size, size), selected, tip)
 }
 
-pub fn icon_button_sized(ui: &mut Ui, icon: &str, size: Vec2, selected: bool, tip: &str) -> Response {
+pub fn icon_button_sized(
+    ui: &mut Ui,
+    icon: &str,
+    size: Vec2,
+    selected: bool,
+    tip: &str,
+) -> Response {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let enabled = ui.is_enabled();
     let bg = if selected {
@@ -74,38 +82,75 @@ pub fn icon_button_sized(ui: &mut Ui, icon: &str, size: Vec2, selected: bool, ti
         theme::icon_font((size.y * 0.58).round()),
         fg,
     );
-    if tip.is_empty() { resp } else { resp.on_hover_text(tip) }
+    if tip.is_empty() {
+        resp
+    } else {
+        resp.on_hover_text(tip)
+    }
 }
 
 /// A row of mutually exclusive icon buttons in a shared pill.
-pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(T, &str, &str)]) -> bool {
+pub fn segmented<T: PartialEq + Copy>(
+    ui: &mut Ui,
+    value: &mut T,
+    opts: &[(T, &str, &str)],
+) -> bool {
     let mut changed = false;
     let h = theme::ROW;
-    let w = h + 4.0;
-    let (rect, _) = ui.allocate_exact_size(vec2(w * opts.len() as f32, h), Sense::hover());
+    let text_font = egui::FontId::proportional(12.5);
+    // Icons get square segments; words get room for themselves.
+    let widths: Vec<f32> = opts
+        .iter()
+        .map(|(_, label, _)| {
+            if label.chars().count() == 1 {
+                h + 4.0
+            } else {
+                ui.painter()
+                    .layout_no_wrap(label.to_string(), text_font.clone(), theme::TEXT)
+                    .size()
+                    .x
+                    + 18.0
+            }
+        })
+        .collect();
+    let total: f32 = widths.iter().sum();
+    let (rect, _) = ui.allocate_exact_size(vec2(total, h), Sense::hover());
     ui.painter().rect_filled(rect, 6.0, theme::BG_RAISED);
-    for (i, (v, icon, tip)) in opts.iter().enumerate() {
-        let r = Rect::from_min_size(rect.min + vec2(i as f32 * w, 0.0), vec2(w, h));
-        let resp = ui.interact(r, ui.scope_id().with(("seg", i, *tip)), Sense::click());
+    let mut x = rect.left();
+    for (i, ((v, label, tip), w)) in opts.iter().zip(&widths).enumerate() {
+        let r = Rect::from_min_size(pos2(x, rect.top()), vec2(*w, h));
+        x += w;
+        let resp = ui.interact(
+            r,
+            ui.scope_id().with(("seg", i, *tip, *label)),
+            Sense::click(),
+        );
         let sel = *value == *v;
         if sel {
-            ui.painter().rect_filled(r.shrink(2.0), 4.0, theme::BG_ACTIVE);
+            ui.painter()
+                .rect_filled(r.shrink(2.0), 4.0, theme::BG_ACTIVE);
         } else if resp.hovered() {
-            ui.painter().rect_filled(r.shrink(2.0), 4.0, theme::BG_HOVER);
+            ui.painter()
+                .rect_filled(r.shrink(2.0), 4.0, theme::BG_HOVER);
         }
-        let label_is_icon = icon.chars().count() == 1;
+        let is_icon = label.chars().count() == 1;
         ui.painter().text(
             r.center(),
             Align2::CENTER_CENTER,
-            icon,
-            if label_is_icon {
+            label,
+            if is_icon {
                 theme::icon_font(15.0)
             } else {
-                egui::FontId::proportional(12.0)
+                text_font.clone()
             },
             if sel { Color32::WHITE } else { theme::TEXT_DIM },
         );
-        if resp.on_hover_text(*tip).clicked() && !sel {
+        let resp = if tip.is_empty() {
+            resp
+        } else {
+            resp.on_hover_text(*tip)
+        };
+        if resp.clicked() && !sel {
             *value = *v;
             changed = true;
         }
@@ -116,7 +161,9 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(T, &s
 /// A two-state chip with an icon (and optional text).
 pub fn toggle(ui: &mut Ui, on: &mut bool, icon: &str, text: &str, tip: &str) -> Response {
     let font = egui::FontId::proportional(12.5);
-    let galley = ui.painter().layout_no_wrap(text.to_string(), font.clone(), theme::TEXT);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), font.clone(), theme::TEXT);
     let w = if text.is_empty() {
         theme::ROW + 2.0
     } else {
@@ -157,7 +204,11 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, icon: &str, text: &str, tip: &str) -> 
         *on = !*on;
         resp.mark_changed();
     }
-    if tip.is_empty() { resp } else { resp.on_hover_text(tip) }
+    if tip.is_empty() {
+        resp
+    } else {
+        resp.on_hover_text(tip)
+    }
 }
 
 /// How a field slider maps its value to the bar.
@@ -199,8 +250,7 @@ pub fn field(
     if let Some(mut text) = editing {
         let r = ui.put(
             rect,
-            egui::TextEdit::singleline(&mut text)
-                .align(Align2::CENTER_CENTER),
+            egui::TextEdit::singleline(&mut text).align(Align2::CENTER_CENTER),
         );
         r.request_focus();
         let done = r.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -243,10 +293,21 @@ pub fn field(
     }
     let p = ui.painter();
     let hot = resp.hovered() || resp.dragged();
-    p.rect_filled(rect, 6.0, if hot { theme::BG_HOVER } else { theme::BG_RAISED });
+    p.rect_filled(
+        rect,
+        6.0,
+        if hot {
+            theme::BG_HOVER
+        } else {
+            theme::BG_RAISED
+        },
+    );
     let t = to_t(*value).clamp(0.0, 1.0);
     if t > 0.0 {
-        let fill = Rect::from_min_max(rect.min, pos2(rect.left() + rect.width() * t, rect.bottom()));
+        let fill = Rect::from_min_max(
+            rect.min,
+            pos2(rect.left() + rect.width() * t, rect.bottom()),
+        );
         p.with_clip_rect(fill).rect_filled(
             rect,
             6.0,
@@ -276,7 +337,16 @@ pub fn field(
 
 /// A field for a 0..=1 value shown as a percentage.
 pub fn pct(ui: &mut Ui, label: &str, v: &mut f32, width: f32) -> Response {
-    field(ui, label, v, 0.0, 1.0, Scale::Linear, &|x| format!("{:.0}%", x * 100.0), width)
+    field(
+        ui,
+        label,
+        v,
+        0.0,
+        1.0,
+        Scale::Linear,
+        &|x| format!("{:.0}%", x * 100.0),
+        width,
+    )
 }
 
 /// A panel header with a disclosure triangle; returns whether it's open.
@@ -290,7 +360,11 @@ pub fn panel_header(ui: &mut Ui, title: &str, open: &mut bool, add_actions: impl
         } else {
             egui_phosphor::regular::CARET_RIGHT
         };
-        let col = if resp.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+        let col = if resp.hovered() {
+            theme::TEXT
+        } else {
+            theme::TEXT_DIM
+        };
         ui.painter().text(
             rect.left_center(),
             Align2::LEFT_CENTER,
@@ -319,7 +393,8 @@ pub fn panel_header(ui: &mut Ui, title: &str, open: &mut bool, add_actions: impl
 pub fn divider(ui: &mut Ui) {
     let r = ui.available_rect_before_wrap();
     let y = ui.cursor().top() + 3.0;
-    ui.painter().hline(r.x_range(), y, Stroke::new(1.0, theme::LINE));
+    ui.painter()
+        .hline(r.x_range(), y, Stroke::new(1.0, theme::LINE));
     ui.add_space(7.0);
 }
 
@@ -335,11 +410,16 @@ pub fn swatch(ui: &mut Ui, color: [u8; 3], size: Vec2, selected: bool) -> Respon
     } else {
         Stroke::new(1.0, Color32::from_white_alpha(18))
     };
-    ui.painter().rect_stroke(rect, 4.0, stroke, StrokeKind::Inside);
+    ui.painter()
+        .rect_stroke(rect, 4.0, stroke, StrokeKind::Inside);
     resp
 }
 
 /// A small dim caption.
 pub fn caption(ui: &mut Ui, text: &str) {
-    ui.label(egui::RichText::new(text).size(11.5).color(theme::TEXT_FAINT));
+    ui.label(
+        egui::RichText::new(text)
+            .size(11.5)
+            .color(theme::TEXT_FAINT),
+    );
 }

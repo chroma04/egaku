@@ -185,7 +185,13 @@ impl Selection {
 
     /// Builds a selection from a per-row coverage rasteriser. `row(y, buf)`
     /// fills coverage for canvas row `y` (buffer is canvas-wide, zeroed).
-    fn from_rows(width: u32, height: u32, y0: u32, y1: u32, row: impl Fn(u32, &mut [u8]) + Sync) -> Self {
+    fn from_rows(
+        width: u32,
+        height: u32,
+        y0: u32,
+        y1: u32,
+        row: impl Fn(u32, &mut [u8]) + Sync,
+    ) -> Self {
         let mut s = Selection::empty(width, height);
         let (cols, w) = (s.cols, width as usize);
         let full = Arc::new(SelTile::full());
@@ -208,7 +214,8 @@ impl Selection {
                     let x0 = tx * TILE;
                     let n = TILE.min(w - x0);
                     for ly in 0..TILE {
-                        t.v[ly * TILE..ly * TILE + n].copy_from_slice(&buf[ly * w + x0..ly * w + x0 + n]);
+                        t.v[ly * TILE..ly * TILE + n]
+                            .copy_from_slice(&buf[ly * w + x0..ly * w + x0 + n]);
                     }
                     out.push(if t.is_empty() {
                         None
@@ -231,8 +238,14 @@ impl Selection {
 
     /// A rectangle snapped to whole pixels.
     pub fn rect(width: u32, height: u32, x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
-        let (ax, bx) = (x0.min(x1).round().max(0.0) as u32, x0.max(x1).round().min(width as f32) as u32);
-        let (ay, by) = (y0.min(y1).round().max(0.0) as u32, y0.max(y1).round().min(height as f32) as u32);
+        let (ax, bx) = (
+            x0.min(x1).round().max(0.0) as u32,
+            x0.max(x1).round().min(width as f32) as u32,
+        );
+        let (ay, by) = (
+            y0.min(y1).round().max(0.0) as u32,
+            y0.max(y1).round().min(height as f32) as u32,
+        );
         if ax >= bx || ay >= by {
             return Selection::empty(width, height);
         }
@@ -242,7 +255,15 @@ impl Selection {
     }
 
     /// An ellipse inscribed in the given box.
-    pub fn ellipse(width: u32, height: u32, x0: f32, y0: f32, x1: f32, y1: f32, antialias: bool) -> Self {
+    pub fn ellipse(
+        width: u32,
+        height: u32,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        antialias: bool,
+    ) -> Self {
         let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
         let (rx, ry) = (((x1 - x0) * 0.5).abs(), ((y1 - y0) * 0.5).abs());
         if rx < 0.5 || ry < 0.5 {
@@ -263,8 +284,19 @@ impl Selection {
         if pts.len() < 3 {
             return Selection::empty(width, height);
         }
-        let ymin = pts.iter().map(|p| p.1).fold(f32::MAX, f32::min).floor().max(0.0) as u32;
-        let ymax = (pts.iter().map(|p| p.1).fold(f32::MIN, f32::max).ceil().max(0.0) as u32).min(height);
+        let ymin = pts
+            .iter()
+            .map(|p| p.1)
+            .fold(f32::MAX, f32::min)
+            .floor()
+            .max(0.0) as u32;
+        let ymax = (pts
+            .iter()
+            .map(|p| p.1)
+            .fold(f32::MIN, f32::max)
+            .ceil()
+            .max(0.0) as u32)
+            .min(height);
         let edges: Vec<((f32, f32), (f32, f32))> = (0..pts.len())
             .map(|i| (pts[i], pts[(i + 1) % pts.len()]))
             .filter(|(a, b)| a.1 != b.1)
@@ -403,7 +435,11 @@ impl Selection {
                             _ => crate::blend::div255(x * y),
                         } as u8;
                     }
-                    if t.is_empty() { None } else { Some(Arc::new(t)) }
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(Arc::new(t))
+                    }
                 }
                 _ => unreachable!(),
             };
@@ -422,7 +458,11 @@ impl Selection {
                     for k in 0..TILE_PX {
                         n.v[k] = 255 - t.v[k];
                     }
-                    if n.is_empty() { None } else { Some(Arc::new(n)) }
+                    if n.is_empty() {
+                        None
+                    } else {
+                        Some(Arc::new(n))
+                    }
                 }
             };
         }
@@ -512,7 +552,9 @@ impl Selection {
                         Some(TileCoord::new(x as u32, y as u32))
                     }
                 };
-                [n(-1, 0), n(1, 0), n(0, -1), n(0, 1)].iter().any(|t| state(*t) != 2)
+                [n(-1, 0), n(1, 0), n(0, -1), n(0, 1)]
+                    .iter()
+                    .any(|t| state(*t) != 2)
                     || c.x + 1 == self.cols
                     || c.y + 1 == self.rows
             })
@@ -691,7 +733,10 @@ mod tests {
     fn outline_of_rect() {
         let a = Selection::rect(300, 300, 10.0, 20.0, 150.0, 90.0);
         let segs = a.outline();
-        let len: f32 = segs.iter().map(|s| (s[2] - s[0]).abs() + (s[3] - s[1]).abs()).sum();
+        let len: f32 = segs
+            .iter()
+            .map(|s| (s[2] - s[0]).abs() + (s[3] - s[1]).abs())
+            .sum();
         assert_eq!(len, 2.0 * (140.0 + 70.0));
     }
 

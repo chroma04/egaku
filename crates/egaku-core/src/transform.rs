@@ -53,11 +53,11 @@ impl Affine {
 
     /// `self` applied after `o`.
     pub fn then(self, after: Affine) -> Affine {
-        after.mul(self)
+        after.compose(self)
     }
 
     /// Matrix product `self · o` (apply `o` first).
-    pub fn mul(self, o: Affine) -> Affine {
+    pub fn compose(self, o: Affine) -> Affine {
         let [a, b, c, d, e, f] = self.m;
         let [oa, ob, oc, od, oe, of] = o.m;
         Affine {
@@ -134,7 +134,12 @@ impl Source {
     pub fn new(grid: TileGrid, width: u32, height: u32) -> Source {
         let t = TILE as u32;
         let bounds = grid.bounds().map_or((0, 0, 0, 0), |b| {
-            (b.x0 * t, b.y0 * t, (b.x1 * t).min(width), (b.y1 * t).min(height))
+            (
+                b.x0 * t,
+                b.y0 * t,
+                (b.x1 * t).min(width),
+                (b.y1 * t).min(height),
+            )
         });
         Source {
             width,
@@ -160,7 +165,11 @@ impl Source {
     }
 
     fn level(&self, l: usize) -> &TileGrid {
-        if l == 0 { &self.base } else { &self.mips()[l - 1] }
+        if l == 0 {
+            &self.base
+        } else {
+            &self.mips()[l - 1]
+        }
     }
 
     /// Builds a source from straight-alpha RGBA rows.
@@ -202,7 +211,13 @@ impl Source {
 
     /// Renders one canvas tile of the source mapped through `m` (source →
     /// canvas). `inv` must be `m`'s inverse.
-    pub fn render_tile(&self, m: &Affine, inv: &Affine, smooth: bool, c: TileCoord) -> Option<Tile> {
+    pub fn render_tile(
+        &self,
+        m: &Affine,
+        inv: &Affine,
+        smooth: bool,
+        c: TileCoord,
+    ) -> Option<Tile> {
         let (sx, sy) = m.scales();
         // Source pixels per canvas pixel decides the pyramid level.
         let footprint = 1.0 / sx.min(sy).max(1e-6);
@@ -218,7 +233,10 @@ impl Source {
             (bx1 as f32 / k).ceil() as i64,
             (by1 as f32 / k).ceil() as i64,
         );
-        let (lx0, ly0) = ((bx0 as f32 / k).floor() as i64, (by0 as f32 / k).floor() as i64);
+        let (lx0, ly0) = (
+            (bx0 as f32 / k).floor() as i64,
+            (by0 as f32 / k).floor() as i64,
+        );
         let mut out = Tile::filled([0; 4]);
         let mut any = false;
         let (ox, oy) = (c.x as f32 * TILE as f32, c.y as f32 * TILE as f32);
@@ -228,7 +246,11 @@ impl Source {
                 let p = if smooth {
                     // Pixel centres are at +0.5 in each level.
                     let (u, v) = (u / k - 0.5, v / k - 0.5);
-                    if u < lx0 as f32 - 1.0 || v < ly0 as f32 - 1.0 || u > lw as f32 || v > lh as f32 {
+                    if u < lx0 as f32 - 1.0
+                        || v < ly0 as f32 - 1.0
+                        || u > lw as f32
+                        || v > lh as f32
+                    {
                         continue;
                     }
                     bilinear(grid, u, v)
@@ -272,7 +294,7 @@ impl Source {
 /// Zeroes pixels beyond the canvas in edge tiles.
 pub fn crop_to_canvas(g: &mut TileGrid, width: u32, height: u32) {
     let t = TILE as u32;
-    if width % t == 0 && height % t == 0 {
+    if width.is_multiple_of(t) && height.is_multiple_of(t) {
         return;
     }
     let coords: Vec<TileCoord> = g
@@ -309,7 +331,8 @@ fn bilinear(g: &TileGrid, u: f32, v: f32) -> Px {
     let w11 = fx * fy;
     let mut o = [0u8; 4];
     for i in 0..4 {
-        let v = p00[i] as f32 * w00 + p10[i] as f32 * w10 + p01[i] as f32 * w01 + p11[i] as f32 * w11;
+        let v =
+            p00[i] as f32 * w00 + p10[i] as f32 * w10 + p01[i] as f32 * w01 + p11[i] as f32 * w11;
         o[i] = (v + 0.5) as u8;
     }
     // Premultiplied colour can't exceed alpha; guard rounding.
@@ -384,8 +407,8 @@ mod tests {
     #[test]
     fn affine_inverse() {
         let m = Affine::translate(10.0, -3.0)
-            .mul(Affine::rotate(0.4))
-            .mul(Affine::scale(2.0, 0.5));
+            .compose(Affine::rotate(0.4))
+            .compose(Affine::scale(2.0, 0.5));
         let inv = m.inverse().unwrap();
         let (x, y) = m.apply(7.0, 9.0);
         let (u, v) = inv.apply(x, y);

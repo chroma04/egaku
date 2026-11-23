@@ -45,7 +45,11 @@ impl eframe::App for app::App {
                 .show(ui, |ui| self.menu_bar(ui));
             egui::Panel::top("context")
                 .exact_size(40.0)
-                .frame(bar(theme::BG_PANEL).inner_margin(Margin::symmetric(10, 0)).stroke(Stroke::new(1.0, theme::LINE)))
+                .frame(
+                    bar(theme::BG_PANEL)
+                        .inner_margin(Margin::symmetric(10, 0))
+                        .stroke(Stroke::new(1.0, theme::LINE)),
+                )
                 .show(ui, |ui| self.context_bar(ui));
             egui::Panel::left("tools")
                 .exact_size(52.0)
@@ -55,13 +59,21 @@ impl eframe::App for app::App {
             egui::Panel::right("side")
                 .default_size(292.0)
                 .size_range(250.0..=440.0)
-                .frame(bar(theme::BG_PANEL).inner_margin(Margin::symmetric(12, 6)).stroke(Stroke::new(1.0, theme::LINE)))
+                .frame(
+                    bar(theme::BG_PANEL)
+                        .inner_margin(Margin::symmetric(12, 6))
+                        .stroke(Stroke::new(1.0, theme::LINE)),
+                )
                 .show(ui, |ui| self.side_panel(ui));
             if self.prefs.show_timeline || self.ed.doc.state.frames > 1 {
                 egui::Panel::bottom("timeline")
                     .exact_size(88.0)
                     .resizable(false)
-                    .frame(bar(theme::BG_PANEL).inner_margin(Margin::symmetric(12, 4)).stroke(Stroke::new(1.0, theme::LINE)))
+                    .frame(
+                        bar(theme::BG_PANEL)
+                            .inner_margin(Margin::symmetric(12, 4))
+                            .stroke(Stroke::new(1.0, theme::LINE)),
+                    )
                     .show(ui, |ui| self.timeline(ui));
             }
         }

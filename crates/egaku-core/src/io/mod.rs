@@ -119,7 +119,12 @@ pub fn to_srgb(rgba: &mut [u8], width: u32, icc: &[u8]) -> bool {
     {
         return false;
     }
-    let Ok(t) = src.create_transform_8bit(Layout::Rgba, &dst, Layout::Rgba, TransformOptions::default()) else {
+    let Ok(t) = src.create_transform_8bit(
+        Layout::Rgba,
+        &dst,
+        Layout::Rgba,
+        TransformOptions::default(),
+    ) else {
         return false;
     };
     let row = width as usize * 4;
@@ -143,7 +148,9 @@ pub fn open(path: &Path) -> Result<Document> {
         let d = decode(path)?;
         let mut doc = Document::empty(d.width, d.height, None);
         let mut layer = doc.new_layer(path.file_stem().and_then(|s| s.to_str()).unwrap_or("Image"));
-        layer.tiles = Arc::new(grid_from_rgba(d.width, d.height, &d.rgba, 0, 0, d.width, d.height));
+        layer.tiles = Arc::new(grid_from_rgba(
+            d.width, d.height, &d.rgba, 0, 0, d.width, d.height,
+        ));
         doc.state.active = layer.id;
         doc.state.layers.push(layer);
         Ok(doc)
@@ -212,14 +219,22 @@ pub fn encode(w: u32, h: u32, rgba: &[u8], format: Format) -> Result<Vec<u8>> {
                 })
                 .collect();
             let mut buf = vec![];
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, q.clamp(1, 100))
-                .encode(&rgb, w, h, image::ExtendedColorType::Rgb8)?;
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, q.clamp(1, 100)).encode(
+                &rgb,
+                w,
+                h,
+                image::ExtendedColorType::Rgb8,
+            )?;
             Ok(buf)
         }
         Format::Webp => {
             let mut buf = vec![];
-            image::codecs::webp::WebPEncoder::new_lossless(&mut buf)
-                .encode(rgba, w, h, image::ExtendedColorType::Rgba8)?;
+            image::codecs::webp::WebPEncoder::new_lossless(&mut buf).encode(
+                rgba,
+                w,
+                h,
+                image::ExtendedColorType::Rgba8,
+            )?;
             Ok(buf)
         }
     }
@@ -296,7 +311,9 @@ pub fn decode_to_grid(path: &Path, canvas_w: u32, canvas_h: u32) -> Result<TileG
     let d = decode(path)?;
     let x = (canvas_w as i64 - d.width as i64) / 2;
     let y = (canvas_h as i64 - d.height as i64) / 2;
-    Ok(grid_from_rgba_at(canvas_w, canvas_h, &d.rgba, x, y, d.width, d.height))
+    Ok(grid_from_rgba_at(
+        canvas_w, canvas_h, &d.rgba, x, y, d.width, d.height,
+    ))
 }
 
 pub(crate) fn check_size(w: u32, h: u32) -> Result<()> {
@@ -312,7 +329,15 @@ pub fn grid_from_rgba(cw: u32, ch: u32, rgba: &[u8], x: u32, y: u32, w: u32, h: 
     grid_from_rgba_at(cw, ch, rgba, x as i64, y as i64, w, h)
 }
 
-pub fn grid_from_rgba_at(cw: u32, ch: u32, rgba: &[u8], x: i64, y: i64, w: u32, h: u32) -> TileGrid {
+pub fn grid_from_rgba_at(
+    cw: u32,
+    ch: u32,
+    rgba: &[u8],
+    x: i64,
+    y: i64,
+    w: u32,
+    h: u32,
+) -> TileGrid {
     use rayon::prelude::*;
     let mut grid = TileGrid::new(cw, ch);
     let rect =
@@ -370,6 +395,15 @@ pub fn export_png(doc: &Document, path: &Path) -> Result<()> {
     export(doc, path, Format::Png, 1)
 }
 
+/// Writes via a temporary file and rename, so a crash mid-save never
+/// destroys the previous version.
+pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("egaku-tmp");
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,7 +418,7 @@ mod tests {
         }
         let (w, h, up) = upscale(16, 8, &rgba, 3);
         assert_eq!((w, h), (48, 24));
-        assert_eq!(&up[(3 * 48 + 4) * 4..][..4], &rgba[(1 * 16 + 1) * 4..][..4]);
+        assert_eq!(&up[(3 * 48 + 4) * 4..][..4], &rgba[17 * 4..][..4]);
         let (sw, sh, _) = sprite_sheet(16, 8, &[rgba.clone(), rgba.clone(), rgba], 2);
         assert_eq!((sw, sh), (32, 16));
     }
@@ -403,13 +437,4 @@ mod tests {
         to_srgb(&mut px2, 1, &srgb);
         assert!((px2[0] as i32 - 10).abs() <= 1);
     }
-}
-
-/// Writes via a temporary file and rename, so a crash mid-save never
-/// destroys the previous version.
-pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("egaku-tmp");
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
 }

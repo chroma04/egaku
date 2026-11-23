@@ -236,8 +236,6 @@ pub struct TextDefaults {
     pub size: f32,
     pub bold: bool,
     pub italic: bool,
-    #[serde(skip, default)]
-    pub align: TextAlign,
     pub align_i: u8,
     pub line_height: f32,
 }
@@ -249,7 +247,6 @@ impl Default for TextDefaults {
             size: 72.0,
             bold: false,
             italic: false,
-            align: TextAlign::Left,
             align_i: 0,
             line_height: 1.2,
         }

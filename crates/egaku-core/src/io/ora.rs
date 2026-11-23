@@ -71,11 +71,17 @@ fn esc(s: &str) -> String {
 }
 
 fn fmt_affine(m: &Affine) -> String {
-    m.m.iter().map(|v| format!("{v}")).collect::<Vec<_>>().join(" ")
+    m.m.iter()
+        .map(|v| format!("{v}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn parse_affine(s: &str) -> Option<Affine> {
-    let v: Vec<f32> = s.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+    let v: Vec<f32> = s
+        .split_whitespace()
+        .filter_map(|x| x.parse().ok())
+        .collect();
     (v.len() == 6).then(|| Affine {
         m: [v[0], v[1], v[2], v[3], v[4], v[5]],
     })
@@ -189,7 +195,11 @@ pub fn save_to_vec(doc: &Document) -> Result<Vec<u8>> {
                         o.source.width,
                         o.source.height,
                         fmt_affine(&o.transform),
-                        if o.smooth { "" } else { " egaku:smooth=\"false\"" }
+                        if o.smooth {
+                            ""
+                        } else {
+                            " egaku:smooth=\"false\""
+                        }
                     );
                 }
                 _ => {
@@ -617,7 +627,10 @@ mod tests {
         let g = ed.doc.active_id();
         ed.set_layer(g, "rename", |l| l.name = "Folder".into());
         ed.select_layer(mid);
-        let _ = Place { parent: None, index: 0 };
+        let _ = Place {
+            parent: None,
+            index: 0,
+        };
 
         let bytes = save_to_vec(&ed.doc).unwrap();
         let doc = load_from_reader(Cursor::new(bytes)).unwrap();
@@ -688,7 +701,10 @@ mod tests {
         .unwrap();
         ed.set_fps(8);
         let doc = load_from_reader(Cursor::new(save_to_vec(&ed.doc).unwrap())).unwrap();
-        assert_eq!((doc.state.frames, doc.state.frame, doc.state.fps), (2, 1, 8));
+        assert_eq!(
+            (doc.state.frames, doc.state.frame, doc.state.fps),
+            (2, 1, 8)
+        );
         match &doc.layers()[1].content {
             Content::Image(o) => {
                 assert_eq!((o.source.width, o.source.height), (32, 16));

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use eframe::egui::{self, Pos2};
+use egaku_core::Editor;
 use egaku_core::adjust::Adjustment;
 use egaku_core::brush::BrushParams;
 use egaku_core::color::Hsv;
@@ -14,7 +15,6 @@ use egaku_core::editor::{Copied, Refusal};
 use egaku_core::io::{self, Decoded, Format};
 use egaku_core::object::TextObject;
 use egaku_core::transform::{Affine, Source};
-use egaku_core::Editor;
 
 use crate::canvas::{CanvasTextures, View};
 use crate::prefs::{Prefs, Tool};
@@ -25,19 +25,43 @@ use crate::theme;
 pub enum Gesture {
     None,
     Stroke,
-    Pan { last: Pos2 },
-    Zoom { start: Pos2, start_zoom: f32 },
-    Rotate { start_angle: f32, start_rot: f32 },
+    Pan {
+        last: Pos2,
+    },
+    Zoom {
+        start: Pos2,
+        start_zoom: f32,
+    },
+    Rotate {
+        start_angle: f32,
+        start_rot: f32,
+    },
     /// Dragging the active layer (or selection) with the move tool.
-    Move { start: Pos2 },
+    Move {
+        start: Pos2,
+    },
     /// Dragging a transform handle.
-    Handle { handle: crate::handles::Handle, start: Pos2, start_delta: Affine },
+    Handle {
+        handle: crate::handles::Handle,
+        start: Pos2,
+        start_delta: Affine,
+    },
     Pick,
     /// Rectangle or ellipse selection (canvas coordinates).
-    SelectBox { start: Pos2, end: Pos2 },
+    SelectBox {
+        start: Pos2,
+        end: Pos2,
+    },
     Lasso,
-    Gradient { start: Pos2, end: Pos2 },
-    Crop { handle: crate::handles::Handle, start: Pos2, start_rect: [f32; 4] },
+    Gradient {
+        start: Pos2,
+        end: Pos2,
+    },
+    Crop {
+        handle: crate::handles::Handle,
+        start: Pos2,
+        start_rect: [f32; 4],
+    },
 }
 
 /// A tool, possibly temporarily overridden by a held key.
@@ -71,10 +95,22 @@ pub enum Modal {
     About,
     Export,
     ExportAnim(AnimFormat),
-    ImageSize { w: u32, h: u32, lock: bool, smooth: bool },
-    CanvasSize { w: u32, h: u32, anchor: (i32, i32) },
+    ImageSize {
+        w: u32,
+        h: u32,
+        lock: bool,
+        smooth: bool,
+    },
+    CanvasSize {
+        w: u32,
+        h: u32,
+        anchor: (i32, i32),
+    },
     Adjust(Adjustment),
-    Number { what: NumberOp, value: f32 },
+    Number {
+        what: NumberOp,
+        value: f32,
+    },
     Rasterize(LayerId),
     Recover(Vec<crate::recovery::Entry>),
 }
@@ -350,7 +386,9 @@ impl App {
         let msg = match r {
             Refusal::LayerHidden => "This layer is hidden — show it to edit it".to_string(),
             Refusal::LayerEmpty => "Nothing to move on this layer".to_string(),
-            Refusal::NotPaintable(Kind::Group) => "Choose a layer inside the group to paint on".to_string(),
+            Refusal::NotPaintable(Kind::Group) => {
+                "Choose a layer inside the group to paint on".to_string()
+            }
             Refusal::NotPaintable(_) => {
                 let id = self.ed.doc.active_id();
                 self.modal = Some(Modal::Rasterize(id));
@@ -392,7 +430,11 @@ impl App {
     }
 
     pub fn copy(&mut self, ctx: &egui::Context, merged: bool, cut: bool) {
-        let c = if cut { self.ed.cut() } else { self.ed.copy(merged) };
+        let c = if cut {
+            self.ed.cut()
+        } else {
+            self.ed.copy(merged)
+        };
         match c {
             Some(c) => {
                 let img = egui::ColorImage::from_rgba_unmultiplied(
@@ -624,7 +666,12 @@ impl App {
     }
 
     /// Places an image file as a transformable image layer.
-    pub fn import_image(&mut self, ctx: &egui::Context, path: Option<PathBuf>, at: Option<(f32, f32)>) {
+    pub fn import_image(
+        &mut self,
+        ctx: &egui::Context,
+        path: Option<PathBuf>,
+        at: Option<(f32, f32)>,
+    ) {
         let Some(path) = path.or_else(|| {
             self.dialog()
                 .add_filter("Images", io::IMAGE_EXTENSIONS)
@@ -731,13 +778,13 @@ impl App {
         });
     }
 
-    /// Quick export with the last settings (Ctrl+Shift+E).
-    pub fn export_quick(&mut self, ctx: &egui::Context) {
-        let (f, s) = (self.prefs.export_format, self.prefs.export_scale.max(1));
-        self.export(ctx, f, s);
-    }
-
-    pub fn export_animation(&mut self, ctx: &egui::Context, fmt: AnimFormat, scale: u32, columns: u32) {
+    pub fn export_animation(
+        &mut self,
+        ctx: &egui::Context,
+        fmt: AnimFormat,
+        scale: u32,
+        columns: u32,
+    ) {
         let (ext, filter) = match fmt {
             AnimFormat::Gif => ("gif", "GIF"),
             AnimFormat::Apng => ("png", "Animated PNG"),
@@ -862,7 +909,11 @@ impl App {
     pub fn autosave(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         let id = self.ed.state_id();
-        if !self.ed.is_modified() || id == self.autosaved_id || self.autosave_busy || self.ed.is_busy() {
+        if !self.ed.is_modified()
+            || id == self.autosaved_id
+            || self.autosave_busy
+            || self.ed.is_busy()
+        {
             return;
         }
         if now - self.last_autosave < 60.0 {
@@ -879,7 +930,10 @@ impl App {
         let tx = self.io_tx.clone();
         std::thread::spawn(move || {
             let _ = io::ora::save(&doc, &target);
-            let _ = tx.send(IoDone::Autosaved { state_id: id, doc_gen });
+            let _ = tx.send(IoDone::Autosaved {
+                state_id: id,
+                doc_gen,
+            });
         });
     }
 

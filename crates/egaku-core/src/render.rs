@@ -25,7 +25,8 @@ use crate::tile::{TILE, Tile, TileCoord, TileRect, tiles_for};
 /// adjustment being previewed, onion skins.
 pub trait Ov: Sync {
     /// The layer being modified, if any. Everything below its root-level
-    /// ancestor is cached while the override lasts.
+    /// ancestor is cached while the override lasts. `tile` and `under` are
+    /// only consulted for this layer.
     fn layer(&self) -> Option<LayerId>;
     /// Replacement pixels for one tile of `l`: `None` if `l` isn't
     /// overridden, `Some(None)` if the tile becomes empty.
@@ -50,7 +51,18 @@ impl Ov for NoOverride {
 /// blend mode: its tiles, or for a group its children composited in
 /// isolation.
 pub fn layer_content<'a>(l: &'a Layer, c: TileCoord, ov: &dyn Ov) -> Option<Cow<'a, Tile>> {
-    if let Some(t) = ov.tile(l, c) {
+    content(l, c, ov, ov.layer())
+}
+
+fn content<'a>(
+    l: &'a Layer,
+    c: TileCoord,
+    ov: &dyn Ov,
+    target: Option<LayerId>,
+) -> Option<Cow<'a, Tile>> {
+    if target == Some(l.id)
+        && let Some(t) = ov.tile(l, c)
+    {
         return t.map(Cow::Owned);
     }
     match &l.content {
@@ -59,8 +71,12 @@ pub fn layer_content<'a>(l: &'a Layer, c: TileCoord, ov: &dyn Ov) -> Option<Cow<
                 return None;
             }
             let mut t = Tile::filled([0; 4]);
-            compose_list(children, c, &mut t, ov);
-            if t.is_empty() { None } else { Some(Cow::Owned(t)) }
+            list(children, c, &mut t, ov, target);
+            if t.is_empty() {
+                None
+            } else {
+                Some(Cow::Owned(t))
+            }
         }
         _ => l.tiles.get(c).map(|t| Cow::Borrowed(&**t)),
     }
@@ -72,6 +88,10 @@ pub fn layer_content<'a>(l: &'a Layer, c: TileCoord, ov: &dyn Ov) -> Option<Cow<
 /// beneath it (its base), as if the base were opaque; the base's alpha,
 /// opacity and blend mode then apply to the result, as in Photoshop.
 pub fn compose_list(layers: &[Layer], c: TileCoord, out: &mut Tile, ov: &dyn Ov) {
+    list(layers, c, out, ov, ov.layer());
+}
+
+fn list(layers: &[Layer], c: TileCoord, out: &mut Tile, ov: &dyn Ov, target: Option<LayerId>) {
     let n = layers.len();
     let mut i = 0;
     while i < n {
@@ -81,12 +101,14 @@ pub fn compose_list(layers: &[Layer], c: TileCoord, out: &mut Tile, ov: &dyn Ov)
             j += 1;
         }
         if base.is_shown() {
-            ov.under(base, c, out);
-            if let Some(t) = layer_content(base, c, ov) {
+            if target == Some(base.id) {
+                ov.under(base, c, out);
+            }
+            if let Some(t) = content(base, c, ov, target) {
                 let clips = &layers[i + 1..j];
                 if clips.iter().any(|l| l.is_shown()) {
                     let mut t = t.into_owned();
-                    apply_clips(&mut t, clips, c, ov);
+                    apply_clips(&mut t, clips, c, ov, target);
                     blend_tile(out, &t, base.opacity_u8(), base.blend);
                 } else {
                     blend_tile(out, &t, base.opacity_u8(), base.blend);
@@ -97,7 +119,13 @@ pub fn compose_list(layers: &[Layer], c: TileCoord, out: &mut Tile, ov: &dyn Ov)
     }
 }
 
-fn apply_clips(base: &mut Tile, clips: &[Layer], c: TileCoord, ov: &dyn Ov) {
+fn apply_clips(
+    base: &mut Tile,
+    clips: &[Layer],
+    c: TileCoord,
+    ov: &dyn Ov,
+    target: Option<LayerId>,
+) {
     // Remember the base's alpha and make it opaque.
     let mut alpha = [0u8; crate::tile::TILE_PX];
     for (a, p) in alpha.iter_mut().zip(base.px.iter_mut()) {
@@ -115,8 +143,10 @@ fn apply_clips(base: &mut Tile, clips: &[Layer], c: TileCoord, ov: &dyn Ov) {
         if !l.is_shown() {
             continue;
         }
-        ov.under(l, c, base);
-        if let Some(t) = layer_content(l, c, ov) {
+        if target == Some(l.id) {
+            ov.under(l, c, base);
+        }
+        if let Some(t) = content(l, c, ov, target) {
             blend_tile(base, &t, l.opacity_u8(), l.blend);
         }
     }

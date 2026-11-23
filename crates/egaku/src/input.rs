@@ -32,10 +32,16 @@ impl App {
             Active::Tool(Tool::Hand)
         } else if m.alt
             && !m.shift
-            && matches!(tool, Tool::Brush | Tool::Eraser | Tool::Fill | Tool::Gradient | Tool::Text)
+            && matches!(
+                tool,
+                Tool::Brush | Tool::Eraser | Tool::Fill | Tool::Gradient | Tool::Text
+            )
         {
             Active::Tool(Tool::Picker)
-        } else if m.command && !m.shift && !matches!(tool, Tool::Move | Tool::Hand | Tool::Select | Tool::Crop) {
+        } else if m.command
+            && !m.shift
+            && !matches!(tool, Tool::Move | Tool::Hand | Tool::Select | Tool::Crop)
+        {
             Active::Tool(Tool::Move)
         } else if self.pen_eraser && tool == Tool::Brush {
             Active::Tool(Tool::Eraser)
@@ -63,7 +69,12 @@ impl App {
             Content::Text(o) => (o.transform, o.bbox.0, o.bbox.1),
             _ => return None,
         };
-        Some([m.apply(0.0, 0.0), m.apply(w, 0.0), m.apply(w, h), m.apply(0.0, h)])
+        Some([
+            m.apply(0.0, 0.0),
+            m.apply(w, 0.0),
+            m.apply(w, h),
+            m.apply(0.0, h),
+        ])
     }
 
     // ---- canvas -------------------------------------------------------------
@@ -448,7 +459,12 @@ impl App {
         // Clicking on a text layer edits it; elsewhere starts new text.
         let target = self
             .layer_at(c.x, c.y)
-            .filter(|id| self.ed.doc.find(*id).is_some_and(|l| l.kind() == Kind::Text))
+            .filter(|id| {
+                self.ed
+                    .doc
+                    .find(*id)
+                    .is_some_and(|l| l.kind() == Kind::Text)
+            })
             .or_else(|| {
                 // Or anywhere inside the current text's box.
                 let l = self.ed.doc.active_layer();
@@ -571,9 +587,20 @@ impl App {
                             Pos2::new(start.x, c.y)
                         };
                     }
-                    let d = handles::drag(handle, frame, size, start_delta, start, p, m.shift, m.alt, m.shift);
+                    let d = handles::drag(
+                        handle,
+                        frame,
+                        size,
+                        start_delta,
+                        start,
+                        p,
+                        m.shift,
+                        m.alt,
+                        m.shift,
+                    );
                     let smooth = self.prefs.smooth_transform;
-                    let d = if handle == Handle::Inside && self.ed.doc.active_layer().is_paintable() {
+                    let d = if handle == Handle::Inside && self.ed.doc.active_layer().is_paintable()
+                    {
                         // Whole-pixel moves keep raster pixels crisp.
                         let mut d = d;
                         d.m[4] = d.m[4].round();
@@ -606,7 +633,8 @@ impl App {
                 let mut end = c;
                 if m.shift {
                     let d = c - start;
-                    let a = (d.y.atan2(d.x) / std::f32::consts::FRAC_PI_4).round() * std::f32::consts::FRAC_PI_4;
+                    let a = (d.y.atan2(d.x) / std::f32::consts::FRAC_PI_4).round()
+                        * std::f32::consts::FRAC_PI_4;
                     end = start + egui::vec2(a.cos(), a.sin()) * d.length();
                 }
                 self.gesture = Gesture::Gradient { start, end };
@@ -647,7 +675,15 @@ impl App {
                     }
                 } else {
                     let s = if self.prefs.select_shape == SelectShape::Ellipse {
-                        Selection::ellipse(w, h, start.x, start.y, end.x, end.y, self.prefs.select_antialias)
+                        Selection::ellipse(
+                            w,
+                            h,
+                            start.x,
+                            start.y,
+                            end.x,
+                            end.y,
+                            self.prefs.select_antialias,
+                        )
                     } else {
                         Selection::rect(w, h, start.x, start.y, end.x, end.y)
                     };
@@ -801,7 +837,7 @@ impl App {
             self.request(ctx, Pending::Open(None));
         }
         if sc(cs, Key::E) {
-            self.export_quick(ctx);
+            self.modal = Some(Modal::Export);
         }
         if sc(cs, Key::Z) || sc(cmd, Key::Y) {
             self.cancel_modes();
@@ -949,10 +985,10 @@ impl App {
             let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
         }
-        if key(Key::Delete) || key(Key::Backspace) {
-            if let Err(r) = self.ed.clear_selected() {
-                self.refusal(ctx, r);
-            }
+        if (key(Key::Delete) || key(Key::Backspace))
+            && let Err(r) = self.ed.clear_selected()
+        {
+            self.refusal(ctx, r);
         }
         if alt_key(Key::Backspace) || alt_key(Key::Delete) {
             let c = self.prefs.fg;
@@ -961,7 +997,8 @@ impl App {
             }
         }
         if key(Key::Slash) {
-            self.ed.set_layer(active, "Alpha lock", |l| l.alpha_lock = !l.alpha_lock);
+            self.ed
+                .set_layer(active, "Alpha lock", |l| l.alpha_lock = !l.alpha_lock);
         }
         if key(Key::F1) {
             self.modal = Some(Modal::Shortcuts);
@@ -971,10 +1008,18 @@ impl App {
             let b = self.current_brush_mut();
             let pixel = b.pixel;
             if key(Key::OpenBracket) {
-                b.size = if pixel { (b.size - 1.0).max(1.0) } else { (b.size / 1.18).max(1.0) };
+                b.size = if pixel {
+                    (b.size - 1.0).max(1.0)
+                } else {
+                    (b.size / 1.18).max(1.0)
+                };
             }
             if key(Key::CloseBracket) {
-                b.size = if pixel { (b.size + 1.0).min(64.0) } else { (b.size * 1.18).min(2000.0) };
+                b.size = if pixel {
+                    (b.size + 1.0).min(64.0)
+                } else {
+                    (b.size * 1.18).min(2000.0)
+                };
             }
             if shift_key(Key::OpenBracket) {
                 b.hardness = (b.hardness - 0.1).max(0.0);
@@ -1005,7 +1050,10 @@ impl App {
 }
 
 pub const SHORTCUTS: &[(&str, &str)] = &[
-    ("V  M  L  W  C", "Move, Select (M again: ellipse), Lasso, Magic wand, Crop"),
+    (
+        "V  M  L  W  C",
+        "Move, Select (M again: ellipse), Lasso, Magic wand, Crop",
+    ),
     ("B  E  G  ⇧G  T", "Brush, Eraser, Fill, Gradient, Text"),
     ("I  H", "Eyedropper, Hand"),
     ("Space + drag", "Pan (or middle mouse / trackpad scroll)"),
@@ -1019,10 +1067,19 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("1 … 0", "Brush opacity 10% … 100%"),
     ("X / D", "Swap / reset colours"),
     ("Ctrl+T", "Free transform (Enter applies, Esc cancels)"),
-    ("Ctrl+A / Ctrl+D / Ctrl+Shift+I", "Select all / deselect / invert"),
-    ("Shift / Alt while selecting", "Add to / subtract from selection"),
+    (
+        "Ctrl+A / Ctrl+D / Ctrl+Shift+I",
+        "Select all / deselect / invert",
+    ),
+    (
+        "Shift / Alt while selecting",
+        "Add to / subtract from selection",
+    ),
     ("Del  ·  Alt+Del", "Clear selection · fill with colour"),
-    ("Ctrl+C / X / V", "Copy / cut / paste (Ctrl+Shift+C copies merged)"),
+    (
+        "Ctrl+C / X / V",
+        "Copy / cut / paste (Ctrl+Shift+C copies merged)",
+    ),
     ("Ctrl+J", "Duplicate layer (or copy selection to a layer)"),
     ("Ctrl+G / Ctrl+Shift+G", "Group / ungroup"),
     ("Ctrl+Alt+G", "Clip to layer below"),

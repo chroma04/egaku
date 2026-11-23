@@ -155,7 +155,9 @@ impl Mask {
     pub fn restrict(&mut self, sel: &crate::selection::Selection) {
         for i in 0..self.tiles.len() {
             let c = TileCoord::new(i as u32 % self.cols, i as u32 / self.cols);
-            let Some(t) = &mut self.tiles[i] else { continue };
+            let Some(t) = &mut self.tiles[i] else {
+                continue;
+            };
             match sel.tile(c) {
                 None => t.v.fill(0),
                 Some(s) => {

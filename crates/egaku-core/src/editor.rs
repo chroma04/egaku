@@ -51,15 +51,20 @@ pub struct Transforming {
 
 impl Transforming {
     fn matrix(&self) -> Affine {
-        self.delta.mul(self.src_m)
+        self.delta.compose(self.src_m)
     }
 
     /// Corners of the handle frame in canvas coordinates, clockwise from the
     /// top-left.
     pub fn quad(&self) -> [(f32, f32); 4] {
-        let m = self.delta.mul(self.frame);
+        let m = self.delta.compose(self.frame);
         let (w, h) = self.size;
-        [m.apply(0.0, 0.0), m.apply(w, 0.0), m.apply(w, h), m.apply(0.0, h)]
+        [
+            m.apply(0.0, 0.0),
+            m.apply(w, 0.0),
+            m.apply(w, h),
+            m.apply(0.0, h),
+        ]
     }
 
     fn dest_rect(&self, cols: u32, rows: u32) -> TileRect {
@@ -162,7 +167,8 @@ impl Ov for EdOv<'_> {
                 Some(sel) => Some(sel.tile(c)?),
                 None => None,
             };
-            if (s.paint.mode == PaintMode::Erase || s.paint.alpha_lock) && l.tiles.get(c).is_none() {
+            if (s.paint.mode == PaintMode::Erase || s.paint.alpha_lock) && l.tiles.get(c).is_none()
+            {
                 return None;
             }
             let mut t = l
@@ -175,7 +181,11 @@ impl Ov for EdOv<'_> {
         if let Some((t, m, inv)) = &self.transform
             && t.layer == l.id
         {
-            let mut out = t.base.as_ref().and_then(|b| b.get(c)).map(|x| (**x).clone());
+            let mut out = t
+                .base
+                .as_ref()
+                .and_then(|b| b.get(c))
+                .map(|x| (**x).clone());
             let r = if !t.smooth && m.is_translation() && t.src_m == Affine::IDENTITY {
                 let (dx, dy) = (m.m[4].round() as i64, m.m[5].round() as i64);
                 t.src.base.shifted_tile(c, dx, dy)
@@ -197,7 +207,13 @@ impl Ov for EdOv<'_> {
                 return None;
             }
             let new = f.filter.apply(&l.tiles, c);
-            return Some(restrict(l.tiles.get(c).map(|t| &**t), new, f.sel.as_deref(), c, self.alpha_lock));
+            return Some(restrict(
+                l.tiles.get(c).map(|t| &**t),
+                new,
+                f.sel.as_deref(),
+                c,
+                self.alpha_lock,
+            ));
         }
         None
     }
@@ -247,7 +263,9 @@ fn restrict(
             let s = st.v[i] as u32;
             if s != 255 {
                 for ch in 0..4 {
-                    n.px[i][ch] = crate::blend::div255(n.px[i][ch] as u32 * s + o.px[i][ch] as u32 * (255 - s)) as u8;
+                    n.px[i][ch] = crate::blend::div255(
+                        n.px[i][ch] as u32 * s + o.px[i][ch] as u32 * (255 - s),
+                    ) as u8;
                 }
             }
         }
@@ -417,7 +435,9 @@ impl Editor {
     }
 
     fn invalidate_between(&mut self, other: &DocState) {
-        if self.doc.state.size != other.size || self.projection.size() != (self.doc.width, self.doc.height) {
+        if self.doc.state.size != other.size
+            || self.projection.size() != (self.doc.width, self.doc.height)
+        {
             self.doc.sync_size();
             self.projection = Projection::new(self.doc.width, self.doc.height);
             self.size_gen += 1;
@@ -581,7 +601,14 @@ impl Editor {
         Ok(())
     }
 
-    fn apply_mask(&mut self, label: &str, layer: LayerId, mask: &Mask, paint: Paint, sel: Option<&Selection>) {
+    fn apply_mask(
+        &mut self,
+        label: &str,
+        layer: LayerId,
+        mask: &Mask,
+        paint: Paint,
+        sel: Option<&Selection>,
+    ) {
         if mask.is_empty() {
             self.projection.reset_below_cache();
             return;
@@ -895,12 +922,15 @@ impl Editor {
                 y1: 0,
             };
             let start = t.src.dest_tiles(&t.src_m, cols, rows);
-            self.projection.invalidate_rect(if start.is_empty() { id } else { start });
+            self.projection
+                .invalidate_rect(if start.is_empty() { id } else { start });
         }
     }
 
     pub fn commit_transform(&mut self) {
-        let Some(t) = self.transform.take() else { return };
+        let Some(t) = self.transform.take() else {
+            return;
+        };
         let (cols, rows) = self.doc.grid_dims();
         let start = t.src.dest_tiles(&t.src_m, cols, rows);
         self.projection.invalidate_rect(start);
@@ -911,7 +941,11 @@ impl Editor {
         }
         let (w, h) = (self.doc.width, self.doc.height);
         let delta = t.delta;
-        let label = if delta.is_translation() { "Move" } else { "Transform" };
+        let label = if delta.is_translation() {
+            "Move"
+        } else {
+            "Transform"
+        };
         match t.kind {
             Kind::Image | Kind::Text => {
                 self.commit(label, |doc| {
@@ -925,7 +959,9 @@ impl Editor {
                 self.commit(label, |doc| {
                     if let Some(l) = doc.find_mut(t.layer) {
                         l.walk_mut(&mut |d| match d.kind() {
-                            Kind::Raster => d.tiles = Arc::new(transform_grid(&d.tiles, &delta, smooth, w, h)),
+                            Kind::Raster => {
+                                d.tiles = Arc::new(transform_grid(&d.tiles, &delta, smooth, w, h))
+                            }
                             Kind::Image | Kind::Text => transform_object(d, &delta, w, h),
                             Kind::Group => {}
                         });
@@ -940,7 +976,11 @@ impl Editor {
                 } else {
                     t.src.render(&t.matrix(), t.smooth, w, h)
                 };
-                let mut out = t.base.as_deref().cloned().unwrap_or_else(|| TileGrid::new(w, h));
+                let mut out = t
+                    .base
+                    .as_deref()
+                    .cloned()
+                    .unwrap_or_else(|| TileGrid::new(w, h));
                 if t.base.is_none() {
                     out = rendered;
                 } else {
@@ -969,7 +1009,11 @@ impl Editor {
     }
 
     /// Flips or rotates the active layer in place, about its centre.
-    pub fn quick_transform(&mut self, label: &str, f: impl Fn(f32, f32, f32, f32) -> Affine) -> Result<(), Refusal> {
+    pub fn quick_transform(
+        &mut self,
+        label: &str,
+        f: impl Fn(f32, f32, f32, f32) -> Affine,
+    ) -> Result<(), Refusal> {
         self.begin_transform(true)?;
         let t = self.transform.as_ref().unwrap();
         let q = t.quad();
@@ -980,7 +1024,9 @@ impl Editor {
         let lossless = d.m.iter().all(|v| (v - v.round()).abs() < 1e-4) || {
             // 90° steps around a centre on a half-pixel are lossless too.
             let [a, b, c, dd, ..] = d.m;
-            [a, b, c, dd].iter().all(|v| (v.abs() - v.abs().round()).abs() < 1e-4)
+            [a, b, c, dd]
+                .iter()
+                .all(|v| (v.abs() - v.abs().round()).abs() < 1e-4)
         };
         self.set_transform(d, !lossless);
         let _ = label;
@@ -1011,7 +1057,12 @@ impl Editor {
         let t = TILE as i64;
         let m = f.margin() as i64;
         if f.full_canvas() {
-            return TileRect { x0: 0, y0: 0, x1: cols, y1: rows };
+            return TileRect {
+                x0: 0,
+                y0: 0,
+                x1: cols,
+                y1: rows,
+            };
         }
         match l.tiles.bounds() {
             None => TileRect {
@@ -1056,7 +1107,9 @@ impl Editor {
     pub fn commit_filter(&mut self, label: &str) {
         let Some(f) = self.filter.take() else { return };
         self.projection.reset_below_cache();
-        let Some(l) = self.doc.find(f.layer) else { return };
+        let Some(l) = self.doc.find(f.layer) else {
+            return;
+        };
         let src = l.tiles.clone();
         let alpha_lock = l.alpha_lock;
         use rayon::prelude::*;
@@ -1065,7 +1118,16 @@ impl Editor {
             .par_iter()
             .map(|&c| {
                 let new = f.filter.apply(&src, c);
-                (c, restrict(src.get(c).map(|t| &**t), new, f.sel.as_deref(), c, alpha_lock))
+                (
+                    c,
+                    restrict(
+                        src.get(c).map(|t| &**t),
+                        new,
+                        f.sel.as_deref(),
+                        c,
+                        alpha_lock,
+                    ),
+                )
             })
             .collect();
         self.commit(label, |doc| {
@@ -1147,7 +1209,9 @@ impl Editor {
             return false;
         }
         self.commit("Delete layer", |doc| {
-            let Some((_, place)) = doc.take(id) else { return };
+            let Some((_, place)) = doc.take(id) else {
+                return;
+            };
             if doc.state.active == id || doc.find(doc.state.active).is_none() {
                 let sib = doc.siblings(place.parent);
                 doc.state.active = if sib.is_empty() {
@@ -1161,7 +1225,9 @@ impl Editor {
     }
 
     pub fn duplicate_layer(&mut self, id: LayerId) {
-        let Some(place) = self.doc.place_of(id) else { return };
+        let Some(place) = self.doc.place_of(id) else {
+            return;
+        };
         self.commit("Duplicate layer", |doc| {
             let mut l = doc.find(id).unwrap().clone();
             doc.reassign_ids(&mut l);
@@ -1187,7 +1253,8 @@ impl Editor {
 
     pub fn can_merge_down(&self, id: LayerId) -> bool {
         self.below(id).is_some_and(|b| {
-            self.doc.find(id).is_some_and(|l| l.visible) && self.doc.find(b).is_some_and(|l| l.visible)
+            self.doc.find(id).is_some_and(|l| l.visible)
+                && self.doc.find(b).is_some_and(|l| l.visible)
         })
     }
 
@@ -1197,7 +1264,10 @@ impl Editor {
             return false;
         }
         let lower_id = self.below(id).unwrap();
-        let (upper, lower) = (self.doc.find(id).unwrap().clone(), self.doc.find(lower_id).unwrap().clone());
+        let (upper, lower) = (
+            self.doc.find(id).unwrap().clone(),
+            self.doc.find(lower_id).unwrap().clone(),
+        );
         // Composite the pair as they look, with the lower layer's own
         // opacity and mode set aside (it keeps them as properties).
         let mut l2 = lower.clone();
@@ -1242,7 +1312,9 @@ impl Editor {
     /// layer is removed from its old place). Refuses to put a group inside
     /// itself.
     pub fn move_layer(&mut self, id: LayerId, to: Place) {
-        let Some(from) = self.doc.place_of(id) else { return };
+        let Some(from) = self.doc.place_of(id) else {
+            return;
+        };
         if let Some(p) = to.parent
             && (p == id || self.doc.ancestors(p).contains(&id))
         {
@@ -1261,7 +1333,9 @@ impl Editor {
 
     /// Wraps a layer in a new group.
     pub fn group_layer(&mut self, id: LayerId) {
-        let Some(place) = self.doc.place_of(id) else { return };
+        let Some(place) = self.doc.place_of(id) else {
+            return;
+        };
         self.commit("Group layer", |doc| {
             let mut g = doc.new_group(doc.next_name("Group"));
             let gid = g.id;
@@ -1275,12 +1349,16 @@ impl Editor {
 
     /// Replaces a group by its children.
     pub fn ungroup(&mut self, id: LayerId) {
-        let Some(place) = self.doc.place_of(id) else { return };
+        let Some(place) = self.doc.place_of(id) else {
+            return;
+        };
         if !self.doc.find(id).is_some_and(|l| l.is_group()) {
             return;
         }
         self.commit("Ungroup", |doc| {
-            let Some((mut g, _)) = doc.take(id) else { return };
+            let Some((mut g, _)) = doc.take(id) else {
+                return;
+            };
             let (op, vis) = (g.opacity, g.visible);
             let children = std::mem::take(g.children_mut().unwrap());
             let top = children.last().map(|c| c.id);
@@ -1399,8 +1477,19 @@ impl Editor {
     pub fn add_text(&mut self, mut obj: TextObject) -> LayerId {
         let (w, h) = (self.doc.width, self.doc.height);
         let tiles = obj.render(w, h);
-        let name: String = obj.text.lines().next().unwrap_or("Text").chars().take(32).collect();
-        let mut l = self.doc.new_layer(if name.trim().is_empty() { "Text".into() } else { name });
+        let name: String = obj
+            .text
+            .lines()
+            .next()
+            .unwrap_or("Text")
+            .chars()
+            .take(32)
+            .collect();
+        let mut l = self.doc.new_layer(if name.trim().is_empty() {
+            "Text".into()
+        } else {
+            name
+        });
         l.tiles = Arc::new(tiles);
         l.content = Content::Text(Arc::new(obj));
         l.cels.clear();
@@ -1415,12 +1504,32 @@ impl Editor {
         self.commit_coalesced("Edit text", |doc| {
             if let Some(l) = doc.find_mut(id) {
                 let auto_name = match &l.content {
-                    Content::Text(old) => old.text.lines().next().unwrap_or("").chars().take(32).collect::<String>() == l.name,
+                    Content::Text(old) => {
+                        old.text
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .take(32)
+                            .collect::<String>()
+                            == l.name
+                    }
                     _ => false,
                 };
                 if auto_name {
-                    let n: String = obj.text.lines().next().unwrap_or("Text").chars().take(32).collect();
-                    l.name = if n.trim().is_empty() { "Text".into() } else { n };
+                    let n: String = obj
+                        .text
+                        .lines()
+                        .next()
+                        .unwrap_or("Text")
+                        .chars()
+                        .take(32)
+                        .collect();
+                    l.name = if n.trim().is_empty() {
+                        "Text".into()
+                    } else {
+                        n
+                    };
                 }
                 l.tiles = Arc::new(tiles);
                 l.content = Content::Text(Arc::new(obj));
@@ -1434,7 +1543,8 @@ impl Editor {
         let (iw, ih) = (src.width as f32, src.height as f32);
         let s = (w / iw).min(h / ih).min(1.0);
         let (cx, cy) = at.unwrap_or((w * 0.5, h * 0.5));
-        let m = Affine::translate(cx - iw * s * 0.5, cy - ih * s * 0.5).mul(Affine::scale(s, s));
+        let m =
+            Affine::translate(cx - iw * s * 0.5, cy - ih * s * 0.5).compose(Affine::scale(s, s));
         let obj = ImageObject {
             source: Arc::new(src),
             transform: m,
@@ -1583,7 +1693,13 @@ impl Editor {
         if (nw, nh, dx, dy) == (self.doc.width, self.doc.height, 0, 0) {
             return;
         }
-        self.remap("Canvas size", nw, nh, Affine::translate(dx as f32, dy as f32), false);
+        self.remap(
+            "Canvas size",
+            nw,
+            nh,
+            Affine::translate(dx as f32, dy as f32),
+            false,
+        );
     }
 
     /// Crops to a rectangle.
@@ -1615,9 +1731,9 @@ impl Editor {
         let q = quarters.rem_euclid(4);
         let half = std::f32::consts::FRAC_PI_2;
         let (m, nw, nh) = match q {
-            1 => (Affine::translate(h, 0.0).mul(exact_rot(1)), h, w),
-            2 => (Affine::translate(w, h).mul(exact_rot(2)), w, h),
-            3 => (Affine::translate(0.0, w).mul(exact_rot(3)), h, w),
+            1 => (Affine::translate(h, 0.0).compose(exact_rot(1)), h, w),
+            2 => (Affine::translate(w, h).compose(exact_rot(2)), w, h),
+            3 => (Affine::translate(0.0, w).compose(exact_rot(3)), h, w),
             _ => return,
         };
         let _ = half;
@@ -1627,9 +1743,9 @@ impl Editor {
     pub fn flip_canvas(&mut self, horizontal: bool) {
         let (w, h) = (self.doc.width as f32, self.doc.height as f32);
         let m = if horizontal {
-            Affine::translate(w, 0.0).mul(Affine::scale(-1.0, 1.0))
+            Affine::translate(w, 0.0).compose(Affine::scale(-1.0, 1.0))
         } else {
-            Affine::translate(0.0, h).mul(Affine::scale(1.0, -1.0))
+            Affine::translate(0.0, h).compose(Affine::scale(1.0, -1.0))
         };
         self.remap("Flip canvas", self.doc.width, self.doc.height, m, false);
     }
@@ -1653,19 +1769,26 @@ impl Editor {
     pub fn add_frame(&mut self, duplicate: bool) {
         self.cancel_all();
         let f = self.doc.state.frame;
-        self.commit(if duplicate { "Duplicate frame" } else { "New frame" }, |doc| {
-            let frames = doc.state.frames;
-            doc.walk_mut(|l| {
-                if !l.is_paintable() {
-                    return;
-                }
-                l.cels.resize(frames, None);
-                let copy = duplicate.then(|| l.tiles.clone()).filter(|t| !t.is_empty());
-                l.cels.insert(f + 1, copy);
-            });
-            doc.state.frames += 1;
-            doc.set_frame(f + 1);
-        });
+        self.commit(
+            if duplicate {
+                "Duplicate frame"
+            } else {
+                "New frame"
+            },
+            |doc| {
+                let frames = doc.state.frames;
+                doc.walk_mut(|l| {
+                    if !l.is_paintable() {
+                        return;
+                    }
+                    l.cels.resize(frames, None);
+                    let copy = duplicate.then(|| l.tiles.clone()).filter(|t| !t.is_empty());
+                    l.cels.insert(f + 1, copy);
+                });
+                doc.state.frames += 1;
+                doc.set_frame(f + 1);
+            },
+        );
     }
 
     pub fn delete_frame(&mut self) {
@@ -1778,13 +1901,13 @@ fn transform_object(l: &mut Layer, m: &Affine, w: u32, h: u32) {
     match &l.content {
         Content::Image(o) => {
             let mut o = (**o).clone();
-            o.transform = m.mul(o.transform);
+            o.transform = m.compose(o.transform);
             l.tiles = Arc::new(o.render(w, h));
             l.content = Content::Image(Arc::new(o));
         }
         Content::Text(o) => {
             let mut o = (**o).clone();
-            o.transform = m.mul(o.transform);
+            o.transform = m.compose(o.transform);
             l.tiles = Arc::new(o.render(w, h));
             l.content = Content::Text(Arc::new(o));
         }
@@ -1922,14 +2045,23 @@ mod tests {
         ed.update_projection(None, usize::MAX);
         let after = ed.sample(10.0, 10.0).unwrap();
         for ch in 0..4 {
-            assert!((before[ch] as i32 - after[ch] as i32).abs() <= 1, "{before:?} {after:?}");
+            assert!(
+                (before[ch] as i32 - after[ch] as i32).abs() <= 1,
+                "{before:?} {after:?}"
+            );
         }
         ed.undo();
         assert_eq!(ed.doc.layers().len(), 2);
         ed.duplicate_layer(ed.doc.active_id());
         assert_eq!(ed.doc.layers()[2].name, "Layer 2 copy");
         let top = layer_id(&ed, 2);
-        ed.move_layer(top, Place { parent: None, index: 0 });
+        ed.move_layer(
+            top,
+            Place {
+                parent: None,
+                index: 0,
+            },
+        );
         assert_eq!(ed.doc.active_id(), layer_id(&ed, 0));
         assert!(ed.delete_layer(ed.doc.active_id()));
         assert_eq!(ed.doc.layers().len(), 2);
@@ -2028,7 +2160,8 @@ mod tests {
     fn groups_composite_and_ungroup() {
         let mut ed = Editor::new(Document::new(128, 128, Some([255; 3])));
         let a = ed.doc.active_id();
-        ed.line(brush(), paint([0, 0, 0]), (10.0, 10.0), (100.0, 10.0)).unwrap();
+        ed.line(brush(), paint([0, 0, 0]), (10.0, 10.0), (100.0, 10.0))
+            .unwrap();
         ed.group_layer(a);
         let g = ed.doc.active_id();
         assert!(ed.doc.find(g).unwrap().is_group());
@@ -2056,7 +2189,8 @@ mod tests {
     fn clipping_paints_inside_base() {
         let mut ed = Editor::new(Document::new(128, 128, None));
         // Base: a short stroke. Clipped layer: paint everywhere.
-        ed.line(brush(), paint([0, 0, 255]), (20.0, 20.0), (40.0, 20.0)).unwrap();
+        ed.line(brush(), paint([0, 0, 255]), (20.0, 20.0), (40.0, 20.0))
+            .unwrap();
         ed.add_layer();
         let top = ed.doc.active_id();
         ed.fill_selection([255, 0, 0]).unwrap();
@@ -2073,9 +2207,15 @@ mod tests {
     #[test]
     fn selection_limits_painting_and_moves() {
         let mut ed = Editor::new(Document::new(256, 256, None));
-        ed.select_shape(Selection::rect(256, 256, 0.0, 0.0, 128.0, 256.0), SelectOp::Replace);
+        ed.select_shape(
+            Selection::rect(256, 256, 0.0, 0.0, 128.0, 256.0),
+            SelectOp::Replace,
+        );
         ed.line(
-            BrushParams { size: 30.0, ..brush() },
+            BrushParams {
+                size: 30.0,
+                ..brush()
+            },
             paint([0, 0, 0]),
             (60.0, 100.0),
             (200.0, 100.0),
@@ -2102,7 +2242,8 @@ mod tests {
     #[test]
     fn copy_paste_and_crop() {
         let mut ed = Editor::new(Document::new(200, 100, None));
-        ed.line(brush(), paint([9, 9, 9]), (50.0, 50.0), (60.0, 50.0)).unwrap();
+        ed.line(brush(), paint([9, 9, 9]), (50.0, 50.0), (60.0, 50.0))
+            .unwrap();
         let c = ed.copy(false).unwrap();
         assert!(c.width >= 20 && c.height >= 20);
         ed.paste("Pasted", &c);
@@ -2124,11 +2265,13 @@ mod tests {
     #[test]
     fn animation_frames() {
         let mut ed = Editor::new(Document::new(128, 128, None));
-        ed.line(brush(), paint([1, 2, 3]), (10.0, 10.0), (20.0, 10.0)).unwrap();
+        ed.line(brush(), paint([1, 2, 3]), (10.0, 10.0), (20.0, 10.0))
+            .unwrap();
         ed.add_frame(false);
         assert_eq!((ed.doc.state.frames, ed.doc.state.frame), (2, 1));
         assert!(ed.doc.active_layer().tiles.is_empty());
-        ed.line(brush(), paint([4, 5, 6]), (100.0, 100.0), (110.0, 100.0)).unwrap();
+        ed.line(brush(), paint([4, 5, 6]), (100.0, 100.0), (110.0, 100.0))
+            .unwrap();
         ed.set_frame(0);
         assert_eq!(ed.doc.active_layer().tiles.pixel(15, 10), [1, 2, 3, 255]);
         assert_eq!(ed.doc.active_layer().tiles.pixel(105, 100), [0; 4]);
@@ -2149,14 +2292,19 @@ mod tests {
     fn filter_preview_and_commit() {
         let mut ed = Editor::new(Document::new(128, 128, None));
         ed.fill_selection([200, 100, 0]).unwrap();
-        ed.begin_filter(Arc::new(crate::adjust::Adjustment::Invert)).unwrap();
+        ed.begin_filter(Arc::new(crate::adjust::Adjustment::Invert))
+            .unwrap();
         ed.update_projection(None, usize::MAX);
         assert_eq!(ed.sample(5.0, 5.0), Some([55, 155, 255, 255]));
         ed.cancel_filter();
         ed.update_projection(None, usize::MAX);
         assert_eq!(ed.sample(5.0, 5.0), Some([200, 100, 0, 255]));
-        ed.select_shape(Selection::rect(128, 128, 0.0, 0.0, 10.0, 10.0), SelectOp::Replace);
-        ed.apply_filter("Invert", Arc::new(crate::adjust::Adjustment::Invert)).unwrap();
+        ed.select_shape(
+            Selection::rect(128, 128, 0.0, 0.0, 10.0, 10.0),
+            SelectOp::Replace,
+        );
+        ed.apply_filter("Invert", Arc::new(crate::adjust::Adjustment::Invert))
+            .unwrap();
         let g = &ed.doc.active_layer().tiles;
         assert_eq!(g.pixel(5, 5), [55, 155, 255, 255]);
         assert_eq!(g.pixel(50, 50), [200, 100, 0, 255]);
@@ -2165,15 +2313,21 @@ mod tests {
     #[test]
     fn image_object_is_lossless() {
         let mut ed = Editor::new(Document::new(256, 256, None));
-        let rgba: Vec<u8> = (0..64 * 64).flat_map(|i| [(i % 64) as u8 * 4, 0, 0, 255]).collect();
-        let id = ed.place_image("img", Source::from_rgba(64, 64, &rgba), Some((128.0, 128.0)));
+        let rgba: Vec<u8> = (0..64 * 64)
+            .flat_map(|i| [(i % 64) as u8 * 4, 0, 0, 255])
+            .collect();
+        let id = ed.place_image(
+            "img",
+            Source::from_rgba(64, 64, &rgba),
+            Some((128.0, 128.0)),
+        );
         // Shrink a lot, then grow back: still sharp because the original is kept.
         for s in [0.1, 10.0] {
             ed.begin_transform(true).unwrap();
             ed.set_transform(
                 Affine::translate(128.0, 128.0)
-                    .mul(Affine::scale(s, s))
-                    .mul(Affine::translate(-128.0, -128.0)),
+                    .compose(Affine::scale(s, s))
+                    .compose(Affine::translate(-128.0, -128.0)),
                 true,
             );
             ed.commit_transform();

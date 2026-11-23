@@ -50,16 +50,23 @@ impl Recovery {
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|e| e == "ora"))
-            .filter(|p| !p.file_stem().is_some_and(|s| s.to_string_lossy() == self.session))
+            .filter(|p| {
+                !p.file_stem()
+                    .is_some_and(|s| s.to_string_lossy() == self.session)
+            })
             .map(|p| {
                 let (_, name) = self.meta_of(&p);
                 let when = std::fs::metadata(&p)
                     .and_then(|m| m.modified())
                     .unwrap_or(SystemTime::UNIX_EPOCH);
-                Entry { path: p, name, when }
+                Entry {
+                    path: p,
+                    name,
+                    when,
+                }
             })
             .collect();
-        v.sort_by(|a, b| b.when.cmp(&a.when));
+        v.sort_by_key(|e| std::cmp::Reverse(e.when));
         v
     }
 
@@ -69,7 +76,9 @@ impl Recovery {
         std::fs::create_dir_all(ora.parent()?).ok()?;
         let meta = format!(
             "{name}\n{}",
-            original.map(|p| p.display().to_string()).unwrap_or_default()
+            original
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
         );
         std::fs::write(txt, meta).ok()?;
         Some(ora)
@@ -88,7 +97,11 @@ impl Recovery {
         let txt = ora.with_extension("txt");
         let s = std::fs::read_to_string(txt).unwrap_or_default();
         let mut lines = s.lines();
-        let name = lines.next().filter(|n| !n.is_empty()).unwrap_or("Untitled").to_string();
+        let name = lines
+            .next()
+            .filter(|n| !n.is_empty())
+            .unwrap_or("Untitled")
+            .to_string();
         let path = lines
             .next()
             .filter(|p| !p.is_empty())

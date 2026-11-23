@@ -51,7 +51,9 @@ impl Tablet {
                 return self.state;
             };
             for ev in events {
-                let Event::Tool { tool, event } = ev else { continue };
+                let Event::Tool { tool, event } = ev else {
+                    continue;
+                };
                 match event {
                     ToolEvent::In { .. } => {
                         self.state.eraser = tool.tool_type == Some(Type::Eraser);
@@ -65,10 +67,8 @@ impl Tablet {
                         self.down = false;
                         self.state = PenState::default();
                     }
-                    ToolEvent::Pose(p) => {
-                        if self.down {
-                            self.state.pressure = Some(p.pressure.get().unwrap_or(1.0).clamp(0.0, 1.0));
-                        }
+                    ToolEvent::Pose(p) if self.down => {
+                        self.state.pressure = Some(p.pressure.get().unwrap_or(1.0).clamp(0.0, 1.0));
                     }
                     _ => {}
                 }

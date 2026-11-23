@@ -12,8 +12,6 @@ pub enum Handle {
     Rotate,
     /// Corner or edge, as signs: x and y in -1, 0, 1 (0 = not that axis).
     Edge(i8, i8),
-    /// A new crop rectangle being drawn.
-    New,
 }
 
 /// Screen-space corners of a canvas-space quad.
@@ -83,7 +81,6 @@ pub fn cursor_for(h: Handle, s: &[Pos2; 4]) -> eframe::egui::CursorIcon {
     match h {
         Handle::Inside => C::Move,
         Handle::Rotate => C::Alias,
-        Handle::New => C::Crosshair,
         Handle::Edge(sx, sy) => {
             // Pick a resize cursor by the on-screen direction of the handle.
             let c = s.iter().fold(Vec2::ZERO, |a, p| a + p.to_vec2()) / 4.0;
@@ -124,10 +121,10 @@ pub fn drag(
     centered: bool,
     snap_angle: bool,
 ) -> Affine {
-    let f0 = start.mul(frame);
+    let f0 = start.compose(frame);
     let (w, hgt) = size;
     match h {
-        Handle::Inside | Handle::New => Affine::translate(p.x - p0.x, p.y - p0.y).mul(start),
+        Handle::Inside => Affine::translate(p.x - p0.x, p.y - p0.y).compose(start),
         Handle::Rotate => {
             let (cx, cy) = f0.apply(w * 0.5, hgt * 0.5);
             let a0 = (p0.y - cy).atan2(p0.x - cx);
@@ -139,12 +136,14 @@ pub fn drag(
                 a = ((base + a) / step).round() * step - base;
             }
             Affine::translate(cx, cy)
-                .mul(Affine::rotate(a))
-                .mul(Affine::translate(-cx, -cy))
-                .mul(start)
+                .compose(Affine::rotate(a))
+                .compose(Affine::translate(-cx, -cy))
+                .compose(start)
         }
         Handle::Edge(sx, sy) => {
-            let Some(inv) = f0.inverse() else { return start };
+            let Some(inv) = f0.inverse() else {
+                return start;
+            };
             let (q0x, q0y) = inv.apply(p0.x, p0.y);
             let (qx, qy) = inv.apply(p.x, p.y);
             let anchor = |s: i8, len: f32| match (s, centered) {
@@ -169,11 +168,11 @@ pub fn drag(
             let kx = if kx.abs() < 1e-3 { 1e-3 } else { kx };
             let ky = if ky.abs() < 1e-3 { 1e-3 } else { ky };
             let local = Affine::translate(ax, ay)
-                .mul(Affine::scale(kx, ky))
-                .mul(Affine::translate(-ax, -ay));
-            let f = f0.mul(local);
+                .compose(Affine::scale(kx, ky))
+                .compose(Affine::translate(-ax, -ay));
+            let f = f0.compose(local);
             match frame.inverse() {
-                Some(fi) => f.mul(fi),
+                Some(fi) => f.compose(fi),
                 None => start,
             }
         }
@@ -244,7 +243,7 @@ mod tests {
             false,
             false,
         );
-        let f = d.mul(frame);
+        let f = d.compose(frame);
         let (x0, y0) = f.apply(0.0, 0.0);
         let (x1, y1) = f.apply(100.0, 50.0);
         assert!((x0 - 10.0).abs() < 1e-3 && (y0 - 10.0).abs() < 1e-3);

@@ -60,7 +60,12 @@ fn ants(painter: &egui::Painter, segs: &[(Pos2, Pos2)], phase: f32) {
 fn handle_box(painter: &egui::Painter, p: Pos2) {
     let r = Rect::from_center_size(p, vec2(8.0, 8.0));
     painter.rect_filled(r, 2.0, Color32::WHITE);
-    painter.rect_stroke(r, 2.0, Stroke::new(1.0, Color32::from_black_alpha(180)), egui::StrokeKind::Outside);
+    painter.rect_stroke(
+        r,
+        2.0,
+        Stroke::new(1.0, Color32::from_black_alpha(180)),
+        egui::StrokeKind::Outside,
+    );
 }
 
 fn frame_lines(painter: &egui::Painter, s: &[Pos2; 4], col: Color32) {
@@ -113,20 +118,29 @@ impl App {
             let st = Stroke::new(1.0, col);
             let mut x = x0;
             while x <= x1 {
-                painter.line_segment([to_s(x * step, vis.top()), to_s(x * step, vis.bottom())], st);
+                painter.line_segment(
+                    [to_s(x * step, vis.top()), to_s(x * step, vis.bottom())],
+                    st,
+                );
                 x += 1.0;
             }
             let mut y = y0;
             while y <= y1 {
-                painter.line_segment([to_s(vis.left(), y * step), to_s(vis.right(), y * step)], st);
+                painter.line_segment(
+                    [to_s(vis.left(), y * step), to_s(vis.right(), y * step)],
+                    st,
+                );
                 y += 1.0;
             }
         };
         if self.prefs.pixel_grid && view.zoom >= 8.0 {
-            grid(1.0, Color32::from_rgba_unmultiplied(128, 128, 128, 70));
+            grid(1.0, Color32::from_black_alpha(64));
         }
         if self.prefs.grid_size > 0 {
-            grid(self.prefs.grid_size as f32, Color32::from_rgba_unmultiplied(80, 160, 255, 110));
+            grid(
+                self.prefs.grid_size as f32,
+                Color32::from_rgba_unmultiplied(80, 160, 255, 110),
+            );
         }
 
         // Selection outline.
@@ -159,9 +173,16 @@ impl App {
                         })
                         .collect()
                 } else {
-                    vec![to_s(a.x, a.y), to_s(b.x, a.y), to_s(b.x, b.y), to_s(a.x, b.y)]
+                    vec![
+                        to_s(a.x, a.y),
+                        to_s(b.x, a.y),
+                        to_s(b.x, b.y),
+                        to_s(a.x, b.y),
+                    ]
                 };
-                let segs: Vec<(Pos2, Pos2)> = (0..pts.len()).map(|i| (pts[i], pts[(i + 1) % pts.len()])).collect();
+                let segs: Vec<(Pos2, Pos2)> = (0..pts.len())
+                    .map(|i| (pts[i], pts[(i + 1) % pts.len()]))
+                    .collect();
                 ants(&painter, &segs, (now * 18.0) as f32);
                 let (w, h) = ((b.x - a.x).abs().round(), (b.y - a.y).abs().round());
                 if let Some(p) = self.hover {
@@ -199,15 +220,24 @@ impl App {
                 // Dim what will be cut away.
                 let dim = Color32::from_black_alpha(140);
                 let canvas = [to_s(0.0, 0.0), to_s(w, 0.0), to_s(w, h), to_s(0.0, h)];
-                let inner = [to_s(r[0], r[1]), to_s(r[2], r[1]), to_s(r[2], r[3]), to_s(r[0], r[3])];
-                for i in 0..4 {
-                    let j = (i + 1) % 4;
-                    painter.add(Shape::convex_polygon(
-                        vec![canvas[i], canvas[j], inner[j], inner[i]],
-                        dim,
-                        Stroke::NONE,
-                    ));
+                let inner = [
+                    to_s(r[0], r[1]),
+                    to_s(r[2], r[1]),
+                    to_s(r[2], r[3]),
+                    to_s(r[0], r[3]),
+                ];
+                // One mesh without edge feathering, so the pieces meet
+                // without seams.
+                let mut mesh = Mesh::default();
+                for p in canvas.iter().chain(inner.iter()) {
+                    mesh.colored_vertex(*p, dim);
                 }
+                for i in 0..4u32 {
+                    let j = (i + 1) % 4;
+                    mesh.add_triangle(i, j, 4 + j);
+                    mesh.add_triangle(i, 4 + j, 4 + i);
+                }
+                painter.add(Shape::mesh(mesh));
                 // Rule of thirds.
                 for k in [1.0 / 3.0, 2.0 / 3.0] {
                     let x = r[0] + (r[2] - r[0]) * k;
@@ -252,10 +282,12 @@ impl App {
             if let Gesture::Handle { handle, .. } = self.gesture {
                 handle_cursor = Some(handles::cursor_for(handle, &s));
                 if let Some(t) = self.ed.transforming() {
-                    let (sx, sy) = t.delta.mul(t.frame).scales();
+                    let (sx, sy) = t.delta.compose(t.frame).scales();
                     let (fx, _) = t.frame.scales();
                     let label = match handle {
-                        Handle::Rotate => format!("{:.1}°", t.delta.mul(t.frame).angle().to_degrees()),
+                        Handle::Rotate => {
+                            format!("{:.1}°", t.delta.compose(t.frame).angle().to_degrees())
+                        }
                         Handle::Inside => format!("{:+.0}, {:+.0}", t.delta.m[4], t.delta.m[5]),
                         _ => format!(
                             "{:.0} × {:.0}  ({:.0}%)",
@@ -291,7 +323,9 @@ impl App {
                 (Active::Tool(Tool::Move), _) => CursorIcon::Move,
                 (Active::Tool(Tool::Text), _) => CursorIcon::Text,
                 (Active::Tool(Tool::Brush | Tool::Eraser), _) => CursorIcon::None,
-                (Active::Tool(Tool::Crop), _) if self.crop.is_some() => ctx.output(|o| o.cursor_icon),
+                (Active::Tool(Tool::Crop), _) if self.crop.is_some() => {
+                    ctx.output(|o| o.cursor_icon)
+                }
                 _ => CursorIcon::Crosshair,
             };
             ctx.set_cursor_icon(icon);
@@ -318,14 +352,25 @@ impl App {
                 } else {
                     let r = b.size * 0.5 * scale;
                     if r > 3.0 {
-                        painter.circle_stroke(p, r + 0.5, Stroke::new(1.0, Color32::from_black_alpha(140)));
-                        painter.circle_stroke(p, r - 0.5, Stroke::new(1.0, Color32::from_white_alpha(200)));
+                        painter.circle_stroke(
+                            p,
+                            r + 0.5,
+                            Stroke::new(1.0, Color32::from_black_alpha(140)),
+                        );
+                        painter.circle_stroke(
+                            p,
+                            r - 0.5,
+                            Stroke::new(1.0, Color32::from_white_alpha(200)),
+                        );
                     }
                 }
                 // A tiny crosshair marks the exact hotspot at any size.
                 let k = 3.0;
                 for (a, b) in [(vec2(-k, 0.0), vec2(k, 0.0)), (vec2(0.0, -k), vec2(0.0, k))] {
-                    painter.line_segment([p + a, p + b], Stroke::new(2.5, Color32::from_black_alpha(120)));
+                    painter.line_segment(
+                        [p + a, p + b],
+                        Stroke::new(2.5, Color32::from_black_alpha(120)),
+                    );
                     painter.line_segment([p + a, p + b], Stroke::new(1.0, Color32::WHITE));
                 }
             }
@@ -333,8 +378,16 @@ impl App {
                 let c = self.prefs.fg;
                 let col = Color32::from_rgb(c[0], c[1], c[2]);
                 painter.circle_filled(p + vec2(20.0, -20.0), 11.0, col);
-                painter.circle_stroke(p + vec2(20.0, -20.0), 11.0, Stroke::new(2.0, Color32::WHITE));
-                painter.circle_stroke(p + vec2(20.0, -20.0), 12.5, Stroke::new(1.0, Color32::from_black_alpha(120)));
+                painter.circle_stroke(
+                    p + vec2(20.0, -20.0),
+                    11.0,
+                    Stroke::new(2.0, Color32::WHITE),
+                );
+                painter.circle_stroke(
+                    p + vec2(20.0, -20.0),
+                    12.5,
+                    Stroke::new(1.0, Color32::from_black_alpha(120)),
+                );
             }
         }
 
@@ -344,14 +397,22 @@ impl App {
             let d = vec2(view.rotation.cos(), view.rotation.sin()) * 40.0;
             painter.circle_stroke(c, 40.0, Stroke::new(1.0, Color32::from_white_alpha(90)));
             painter.line_segment([c, c + vec2(d.y, -d.x)], Stroke::new(2.0, theme::ACCENT));
-            tag(&painter, c + vec2(-16.0, 52.0), &format!("{:.0}°", view.rotation.to_degrees()));
+            tag(
+                &painter,
+                c + vec2(-16.0, 52.0),
+                &format!("{:.0}°", view.rotation.to_degrees()),
+            );
         }
         if let Gesture::Move { start } = self.gesture
             && let Some(p) = self.hover
         {
             let c = view.to_canvas(vp, ppp, p);
             let d = c - start;
-            tag(&painter, p + vec2(16.0, 18.0), &format!("{:+.0}, {:+.0}", d.x, d.y));
+            tag(
+                &painter,
+                p + vec2(16.0, 18.0),
+                &format!("{:+.0}, {:+.0}", d.x, d.y),
+            );
         }
 
         self.hud(ui, vp);
@@ -372,21 +433,32 @@ impl App {
             .unwrap_or_else(|| te.obj.clone());
         let (w, h) = (obj.bbox.0.max(obj.size * 0.3), obj.bbox.1.max(obj.size));
         let m = obj.transform;
-        let q = [m.apply(0.0, 0.0), m.apply(w, 0.0), m.apply(w, h), m.apply(0.0, h)];
+        let q = [
+            m.apply(0.0, 0.0),
+            m.apply(w, 0.0),
+            m.apply(w, h),
+            m.apply(0.0, h),
+        ];
         let s = handles::screen_quad(&self.view, vp, ppp, &q);
         let segs: Vec<(Pos2, Pos2)> = (0..4).map(|i| (s[i], s[(i + 1) % 4])).collect();
         ants(painter, &segs, 0.0);
         // A blinking caret at the end of the last line hints where typing goes.
         let blink = (ctx.input(|i| i.time) * 2.0) as i64 % 2 == 0;
         if blink && obj.text.is_empty() {
-            painter.line_segment([s[0] + vec2(2.0, 3.0), s[3] + vec2(2.0, -3.0)], Stroke::new(1.5, theme::ACCENT));
+            painter.line_segment(
+                [s[0] + vec2(2.0, 3.0), s[3] + vec2(2.0, -3.0)],
+                Stroke::new(1.5, theme::ACCENT),
+            );
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
 
         // Typing field just below the box.
         let below = s.iter().fold(s[0], |a, p| if p.y > a.y { *p } else { a });
         let left = s.iter().map(|p| p.x).fold(f32::MAX, f32::min);
-        let at = pos2(left.clamp(vp.left() + 8.0, vp.right() - 300.0), (below.y + 10.0).min(vp.bottom() - 90.0));
+        let at = pos2(
+            left.clamp(vp.left() + 8.0, vp.right() - 300.0),
+            (below.y + 10.0).min(vp.bottom() - 90.0),
+        );
         let mut text = self.text_edit.as_ref().unwrap().obj.text.clone();
         let mut done = false;
         egui::Area::new(egui::Id::unique("text-entry"))
@@ -455,7 +527,13 @@ impl App {
                             let deg = self.view.rotation.to_degrees();
                             if deg.abs() > 0.05
                                 && ui
-                                    .add(egui::Button::new(crate::widgets::il(ph::ARROW_CLOCKWISE, &format!("{deg:.0}°"))).frame(false))
+                                    .add(
+                                        egui::Button::new(crate::widgets::il(
+                                            ph::ARROW_CLOCKWISE,
+                                            &format!("{deg:.0}°"),
+                                        ))
+                                        .frame(false),
+                                    )
                                     .on_hover_text("Reset rotation")
                                     .clicked()
                             {
@@ -463,7 +541,10 @@ impl App {
                             }
                             if self.view.mirror
                                 && ui
-                                    .add(egui::Button::new(crate::widgets::ic(ph::FLIP_HORIZONTAL)).frame(false))
+                                    .add(
+                                        egui::Button::new(crate::widgets::ic(ph::FLIP_HORIZONTAL))
+                                            .frame(false),
+                                    )
                                     .on_hover_text("Mirrored — click to unmirror (Shift+M)")
                                     .clicked()
                             {
@@ -487,7 +568,11 @@ impl App {
                                 mb(self.ed.history.memory()),
                                 self.textures.texture_count()
                             );
-                            let r = ui.add(egui::Button::new(egui::RichText::new(z).monospace()).frame(false).min_size(vec2(52.0, 20.0)));
+                            let r = ui.add(
+                                egui::Button::new(egui::RichText::new(z).monospace())
+                                    .frame(false)
+                                    .min_size(vec2(52.0, 20.0)),
+                            );
                             egui::Popup::menu(&r).show(|ui| {
                                 if ui.button("Fit to window").clicked() {
                                     self.fit_pending = true;
@@ -520,7 +605,11 @@ impl App {
                 self.toast = None;
             } else {
                 let alpha = ((t.until - now) * 3.0).min(1.0) as f32;
-                let icon = if t.warn { ph::WARNING_CIRCLE } else { ph::CHECK_CIRCLE };
+                let icon = if t.warn {
+                    ph::WARNING_CIRCLE
+                } else {
+                    ph::CHECK_CIRCLE
+                };
                 let galley = painter.layout_no_wrap(
                     t.text.clone(),
                     egui::FontId::proportional(13.5),
@@ -528,8 +617,16 @@ impl App {
                 );
                 let size = galley.size() + vec2(48.0, 18.0);
                 let r = Rect::from_center_size(pos2(vp.center().x, vp.bottom() - 48.0), size);
-                painter.rect_filled(r.translate(vec2(0.0, 3.0)), 10.0, Color32::from_black_alpha((60.0 * alpha) as u8));
-                painter.rect_filled(r, 10.0, Color32::from_rgba_unmultiplied(40, 40, 44, (240.0 * alpha) as u8));
+                painter.rect_filled(
+                    r.translate(vec2(0.0, 3.0)),
+                    10.0,
+                    Color32::from_black_alpha((60.0 * alpha) as u8),
+                );
+                painter.rect_filled(
+                    r,
+                    10.0,
+                    Color32::from_rgba_unmultiplied(40, 40, 44, (240.0 * alpha) as u8),
+                );
                 painter.text(
                     r.left_center() + vec2(18.0, 0.0),
                     Align2::CENTER_CENTER,
@@ -546,7 +643,11 @@ impl App {
 
 /// A small dark label.
 fn tag(painter: &egui::Painter, p: Pos2, text: &str) {
-    let g = painter.layout_no_wrap(text.to_string(), egui::FontId::proportional(12.0), Color32::WHITE);
+    let g = painter.layout_no_wrap(
+        text.to_string(),
+        egui::FontId::proportional(12.0),
+        Color32::WHITE,
+    );
     let r = Rect::from_min_size(p, g.size() + vec2(12.0, 6.0));
     painter.rect_filled(r, 5.0, Color32::from_black_alpha(190));
     painter.galley(r.min + vec2(6.0, 3.0), g, Color32::WHITE);

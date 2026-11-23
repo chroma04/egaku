@@ -139,10 +139,11 @@ fn unique_layer_bytes(l: &Layer, after: &DocState) -> usize {
     // A deleted layer's tiles may still be shared (e.g. after a merge).
     let af = flat(after);
     let shared = |c: TileCoord| {
-        af.iter().any(|(a, _)| match (a.tiles.get(c), l.tiles.get(c)) {
-            (Some(x), Some(y)) => std::sync::Arc::ptr_eq(x, y),
-            _ => false,
-        })
+        af.iter()
+            .any(|(a, _)| match (a.tiles.get(c), l.tiles.get(c)) {
+                (Some(x), Some(y)) => std::sync::Arc::ptr_eq(x, y),
+                _ => false,
+            })
     };
     l.tiles.iter().filter(|(c, _)| !shared(*c)).count() * TILE_BYTES
 }

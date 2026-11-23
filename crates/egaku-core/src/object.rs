@@ -159,7 +159,11 @@ impl TextObject {
             TextAlign::Center => Align::Center,
             TextAlign::Right => Align::Right,
         };
-        let text = if self.text.is_empty() { " " } else { &self.text };
+        let text = if self.text.is_empty() {
+            " "
+        } else {
+            &self.text
+        };
         // Lay out once to measure, then again at that width so alignment
         // has a box to align within.
         buf.set_size(self.wrap.map(|w| w * scale), None);
@@ -226,8 +230,8 @@ impl TextObject {
         let (w, h, rgba, pad, bbox) = self.rasterize(scale);
         self.bbox = bbox;
         let src = Source::from_rgba(w, h, &rgba);
-        let local = Affine::scale(1.0 / scale, 1.0 / scale).mul(Affine::translate(-pad, -pad));
-        let m = self.transform.mul(local);
+        let local = Affine::scale(1.0 / scale, 1.0 / scale).compose(Affine::translate(-pad, -pad));
+        let m = self.transform.compose(local);
         src.render(&m, true, width, height)
     }
 }

@@ -22,7 +22,10 @@ pub enum Content {
     Raster,
     /// A container. Children are composited in isolation, then blended
     /// onto what is below with the group's opacity and mode.
-    Group { children: Vec<Layer>, expanded: bool },
+    Group {
+        children: Vec<Layer>,
+        expanded: bool,
+    },
     /// Editable text; the tiles are a rendering of it.
     Text(Arc<TextObject>),
     /// A placed image that can be transformed without losing quality; the

@@ -59,7 +59,8 @@ fn fonts() -> FontDefinitions {
     // SemiBold falls back to the same chain (icons, emoji) as body text.
     let mut chain = f.families[&FontFamily::Proportional].clone();
     chain[0] = "inter-semibold".into();
-    f.families.insert(FontFamily::Name("semibold".into()), chain);
+    f.families
+        .insert(FontFamily::Name("semibold".into()), chain);
     f
 }
 
