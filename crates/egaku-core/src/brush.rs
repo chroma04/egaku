@@ -78,6 +78,10 @@ impl Mask {
 
     /// Stamps one dab, appending the tiles it touched to `dirty`.
     pub fn stamp(&mut self, dab: &Dab, dirty: &mut Vec<TileCoord>) {
+        if dab.pixel {
+            self.stamp_pixel(dab, dirty);
+            return;
+        }
         let r = dab.radius.max(0.5);
         let (w, h) = (self.width as f32, self.height as f32);
         let x0 = (dab.x - r - 1.0).floor().max(0.0);
@@ -127,6 +131,51 @@ impl Mask {
         }
     }
 
+    /// Stamps an aliased square of whole pixels centred on the dab.
+    fn stamp_pixel(&mut self, dab: &Dab, dirty: &mut Vec<TileCoord>) {
+        let side = (dab.radius * 2.0).round().max(1.0) as i64;
+        let x0 = (dab.x - side as f32 * 0.5 + 0.5).floor() as i64;
+        let y0 = (dab.y - side as f32 * 0.5 + 0.5).floor() as i64;
+        let cap = (dab.cap.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
+        let (w, h) = (self.width as i64, self.height as i64);
+        for y in y0.max(0)..(y0 + side).min(h) {
+            for x in x0.max(0)..(x0 + side).min(w) {
+                let c = TileCoord::new((x / TILE as i64) as u32, (y / TILE as i64) as u32);
+                let t = self.tile_mut(c);
+                let v = &mut t.v[(y as usize % TILE) * TILE + x as usize % TILE];
+                *v = (*v).max(cap);
+                if dirty.last() != Some(&c) {
+                    dirty.push(c);
+                }
+            }
+        }
+    }
+
+    /// Multiplies coverage by a selection, so edits only land inside it.
+    pub fn restrict(&mut self, sel: &crate::selection::Selection) {
+        for i in 0..self.tiles.len() {
+            let c = TileCoord::new(i as u32 % self.cols, i as u32 / self.cols);
+            let Some(t) = &mut self.tiles[i] else {
+                continue;
+            };
+            match sel.tile(c) {
+                None => t.v.fill(0),
+                Some(s) => {
+                    for (v, s) in t.v.iter_mut().zip(s.v.iter()) {
+                        *v = ((*v as u32 * *s as u32 + 127) / 255) as u16;
+                    }
+                }
+            }
+        }
+        let tiles = &self.tiles;
+        let cols = self.cols;
+        self.touched.retain(|c| {
+            tiles[(c.y * cols + c.x) as usize]
+                .as_ref()
+                .is_some_and(|t| t.v.iter().any(|v| *v != 0))
+        });
+    }
+
     /// Fills every tile in `rect` that `f` reports as covered.
     pub fn set_from(
         &mut self,
@@ -156,6 +205,8 @@ pub struct Dab {
     pub flow: f32,
     /// Maximum coverage for this dab, 0..=1.
     pub cap: f32,
+    /// Aliased square covering whole pixels (pixel-art mode).
+    pub pixel: bool,
 }
 
 struct DabShape {
@@ -284,6 +335,25 @@ pub fn apply_mask_tile(dst: &mut Tile, mask: &MaskTile, paint: &Paint) {
     }
 }
 
+/// Like [`apply_mask_tile`], with coverage scaled by a selection tile.
+pub fn apply_mask_tile_sel(
+    dst: &mut Tile,
+    mask: &MaskTile,
+    sel: Option<&crate::selection::SelTile>,
+    paint: &Paint,
+) {
+    match sel {
+        None => apply_mask_tile(dst, mask, paint),
+        Some(s) => {
+            let mut m = mask.clone();
+            for (v, s) in m.v.iter_mut().zip(s.v.iter()) {
+                *v = ((*v as u32 * *s as u32 + 127) / 255) as u16;
+            }
+            apply_mask_tile(dst, &m, paint);
+        }
+    }
+}
+
 /// User-facing brush settings.
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(
@@ -305,6 +375,10 @@ pub struct BrushParams {
     pub min_size: f32,
     /// Stabiliser strength, 0..=1.
     pub smoothing: f32,
+    /// Pixel-art mode: aliased square dabs on whole pixels, no gaps.
+    pub pixel: bool,
+    /// In pixel mode, removes the doubled corner pixels of 1px lines.
+    pub pixel_perfect: bool,
 }
 
 impl Default for BrushParams {
@@ -319,6 +393,8 @@ impl Default for BrushParams {
             pressure_opacity: false,
             min_size: 0.15,
             smoothing: 0.3,
+            pixel: false,
+            pixel_perfect: true,
         }
     }
 }
@@ -336,6 +412,10 @@ pub struct StrokeEngine {
     smoothed: Option<Pt>,
     last_raw: Option<Pt>,
     carry: f32,
+    /// Pixel mode: last emitted pixel and pixels held back for the
+    /// pixel-perfect corner test.
+    last_px: Option<(i64, i64)>,
+    held: Vec<Dab>,
 }
 
 impl StrokeEngine {
@@ -345,6 +425,8 @@ impl StrokeEngine {
             smoothed: None,
             last_raw: None,
             carry: 0.0,
+            last_px: None,
+            held: vec![],
         }
     }
 
@@ -370,12 +452,50 @@ impl StrokeEngine {
             y: q.y,
             radius: (p.size * 0.5 * scale).max(0.5),
             hardness: p.hardness,
-            flow: p.flow,
+            flow: if p.pixel { 1.0 } else { p.flow },
             cap,
+            pixel: p.pixel,
+        }
+    }
+
+    /// Emits a pixel-mode dab, skipping repeats and (for 1px brushes with
+    /// pixel-perfect on) the middle pixel of L-shaped corners.
+    fn emit(&mut self, d: Dab, out: &mut Vec<Dab>) {
+        if !d.pixel {
+            out.push(d);
+            return;
+        }
+        let key = (d.x.floor() as i64, d.y.floor() as i64);
+        if self.last_px == Some(key) {
+            return;
+        }
+        self.last_px = Some(key);
+        let perfect = self.params.pixel_perfect && (d.radius * 2.0).round() <= 1.0;
+        if !perfect {
+            out.push(d);
+            return;
+        }
+        self.held.push(d);
+        if self.held.len() == 3 {
+            let p = |d: &Dab| (d.x.floor() as i64, d.y.floor() as i64);
+            let (a, b, c) = (p(&self.held[0]), p(&self.held[1]), p(&self.held[2]));
+            let corner = (a.0 == b.0 || a.1 == b.1)
+                && (b.0 == c.0 || b.1 == c.1)
+                && (a.0 - c.0).abs() == 1
+                && (a.1 - c.1).abs() == 1;
+            if corner {
+                self.held.remove(1);
+            }
+        }
+        while self.held.len() > 2 {
+            out.push(self.held.remove(0));
         }
     }
 
     fn spacing_at(&self, q: Pt) -> f32 {
+        if self.params.pixel {
+            return 0.5;
+        }
         (self.dab_at(q).radius * 2.0 * self.params.spacing.max(0.01)).max(0.5)
     }
 
@@ -395,7 +515,8 @@ impl StrokeEngine {
             }
             t += need;
             self.carry = 0.0;
-            out.push(self.dab_at(lerp_pt(a, b, t / len)));
+            let d = self.dab_at(lerp_pt(a, b, t / len));
+            self.emit(d, out);
         }
     }
 
@@ -405,7 +526,8 @@ impl StrokeEngine {
         self.last_raw = Some(raw);
         let Some(prev) = self.smoothed else {
             self.smoothed = Some(raw);
-            out.push(self.dab_at(raw));
+            let d = self.dab_at(raw);
+            self.emit(d, out);
             return;
         };
         // Exponential smoothing with a strength curve that stays responsive
@@ -427,6 +549,7 @@ impl StrokeEngine {
             self.segment(s, Pt { p: s.p, ..r }, out);
             self.smoothed = Some(r);
         }
+        out.append(&mut self.held);
     }
 
     /// Last position of the stroke, after smoothing.
@@ -480,6 +603,7 @@ mod tests {
             hardness: 1.0,
             flow: 0.5,
             cap: 0.5,
+            pixel: false,
         };
         for _ in 0..50 {
             m.stamp(&dab, &mut dirty);
@@ -500,11 +624,47 @@ mod tests {
             hardness: 1.0,
             flow: 0.02,
             cap: 1.0,
+            pixel: false,
         };
         for _ in 0..800 {
             m.stamp(&dab, &mut dirty);
         }
         assert!(m.value(32, 32) > 65000);
+    }
+
+    #[test]
+    fn pixel_perfect_line() {
+        let params = BrushParams {
+            size: 1.0,
+            pixel: true,
+            pixel_perfect: true,
+            smoothing: 0.0,
+            pressure_size: false,
+            ..Default::default()
+        };
+        let mut e = StrokeEngine::new(params);
+        let mut dabs = vec![];
+        // A staircase drawn as right-then-down moves.
+        let pts = [(0.5, 0.5), (1.5, 0.5), (1.5, 1.5), (2.5, 1.5), (2.5, 2.5)];
+        for (x, y) in pts {
+            e.add_point(x, y, 1.0, &mut dabs);
+        }
+        e.finish(&mut dabs);
+        let px: Vec<(i64, i64)> = dabs
+            .iter()
+            .map(|d| (d.x.floor() as i64, d.y.floor() as i64))
+            .collect();
+        assert_eq!(px.first(), Some(&(0, 0)));
+        assert_eq!(px.last(), Some(&(2, 2)));
+        // Corners removed: the result is a clean diagonal.
+        assert!(!px.contains(&(1, 0)), "{px:?}");
+        let mut m = Mask::new(8, 8);
+        let mut dirty = vec![];
+        for d in &dabs {
+            m.stamp(d, &mut dirty);
+        }
+        assert_eq!(m.value(1, 1), 65535);
+        assert_eq!(m.value(1, 0), 0);
     }
 
     #[test]
@@ -550,6 +710,7 @@ mod tests {
                 hardness: 0.5,
                 flow: 1.0,
                 cap: 1.0,
+                pixel: false,
             },
             &mut dirty,
         );

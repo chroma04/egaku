@@ -12,7 +12,19 @@ rayon.workspace = true
 eframe = { version = "0.37", default-features = false, features = ["wgpu", "wayland", "x11", "default_fonts", "persistence", "accesskit"] }
 serde = { version = "1", features = ["derive"] }
 rfd = "0.18"
+egui-pop-phosphor = "0.15"
+
+# Platform tablet APIs: Wayland and Windows Ink through octotablet; on macOS
+# AppKit reports pen pressure on its own events.
+[target.'cfg(any(windows, all(unix, not(target_os = "macos"))))'.dependencies]
+octotablet = { version = "0.1", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSEvent", "block2"] }
 
 [features]
-# Lets `EFRAME_SCREENSHOT_TO=path.png` capture a frame (used for docs/tests).
-screenshot = ["eframe/__screenshot"]
+default = ["tablet"]
+# Pen pressure and the eraser end via the platform tablet API.
+tablet = ["dep:octotablet"]

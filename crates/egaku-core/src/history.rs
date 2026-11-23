@@ -38,18 +38,43 @@ pub enum Changes {
     Tiles(Vec<TileCoord>),
 }
 
+/// Every layer in preorder with its parent id.
+fn flat(s: &DocState) -> Vec<(&Layer, Option<u64>)> {
+    fn go<'a>(ls: &'a [Layer], parent: Option<u64>, out: &mut Vec<(&'a Layer, Option<u64>)>) {
+        for l in ls {
+            out.push((l, parent));
+            go(l.children(), Some(l.id), out);
+        }
+    }
+    let mut out = vec![];
+    go(&s.layers, None, &mut out);
+    out
+}
+
 /// Compares two states. Unchanged layers share their grids, so this is cheap.
 pub fn diff_states(a: &DocState, b: &DocState) -> Changes {
-    if a.paper != b.paper || a.layers.len() != b.layers.len() {
+    if a.paper != b.paper || a.size != b.size {
+        return Changes::All;
+    }
+    let (fa, fb) = (flat(a), flat(b));
+    if fa.len() != fb.len()
+        || fa
+            .iter()
+            .zip(&fb)
+            .any(|((la, pa), (lb, pb))| la.id != lb.id || pa != pb)
+    {
         return Changes::All;
     }
     let mut out = vec![];
-    for (la, lb) in a.layers.iter().zip(&b.layers) {
-        let looks_different = la.id != lb.id
-            || la.blend != lb.blend
+    for ((la, _), (lb, _)) in fa.iter().zip(&fb) {
+        let looks_different = la.blend != lb.blend
             || la.opacity_u8() != lb.opacity_u8()
-            || la.visible != lb.visible;
+            || la.visible != lb.visible
+            || la.clip != lb.clip;
         if looks_different {
+            if la.is_group() {
+                return Changes::All;
+            }
             // Affects every tile the layer occupies in either state.
             for l in [la, lb] {
                 out.extend(l.tiles.iter().map(|(c, _)| c));
@@ -69,10 +94,25 @@ pub fn diff_states(a: &DocState, b: &DocState) -> Changes {
 /// has moved on to `after`.
 pub fn snapshot_cost(before: &DocState, after: &DocState) -> usize {
     let mut cost = 256;
-    for l in &before.layers {
+    let after_flat = flat(after);
+    let by_id: std::collections::HashMap<u64, &Layer> =
+        after_flat.iter().map(|(l, _)| (l.id, *l)).collect();
+    if let (Some(s), false) = (&before.selection, {
+        match (&before.selection, &after.selection) {
+            (Some(x), Some(y)) => std::sync::Arc::ptr_eq(x, y),
+            (None, None) => true,
+            _ => false,
+        }
+    }) {
+        cost += s.coords().count() * crate::tile::TILE_PX;
+    }
+    for (l, _) in flat(before) {
         cost += 64 + l.name.len();
-        match after.layers.iter().find(|a| a.id == l.id) {
+        match by_id.get(&l.id) {
             Some(a) if std::sync::Arc::ptr_eq(&a.tiles, &l.tiles) => {}
+            Some(a) if (a.tiles.cols(), a.tiles.rows()) != (l.tiles.cols(), l.tiles.rows()) => {
+                cost += l.tiles.unique_bytes();
+            }
             Some(a) => {
                 let mut d = vec![];
                 l.tiles.diff(&a.tiles, &mut d);
@@ -80,17 +120,27 @@ pub fn snapshot_cost(before: &DocState, after: &DocState) -> usize {
             }
             None => cost += unique_layer_bytes(l, after),
         }
+        // Cels of other frames that the new state no longer shares.
+        for (i, cel) in l.cels.iter().enumerate() {
+            let Some(cel) = cel else { continue };
+            let shared = by_id
+                .get(&l.id)
+                .and_then(|a| a.cels.get(i).cloned().flatten())
+                .is_some_and(|x| std::sync::Arc::ptr_eq(&x, cel));
+            if !shared {
+                cost += cel.unique_bytes();
+            }
+        }
     }
     cost
 }
 
 fn unique_layer_bytes(l: &Layer, after: &DocState) -> usize {
     // A deleted layer's tiles may still be shared (e.g. after a merge).
+    let af = flat(after);
     let shared = |c: TileCoord| {
-        after
-            .layers
-            .iter()
-            .any(|a| match (a.tiles.get(c), l.tiles.get(c)) {
+        af.iter()
+            .any(|(a, _)| match (a.tiles.get(c), l.tiles.get(c)) {
                 (Some(x), Some(y)) => std::sync::Arc::ptr_eq(x, y),
                 _ => false,
             })

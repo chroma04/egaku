@@ -12,4 +12,6 @@ png = "0.18"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 quick-xml = "0.42"
 serde = { version = "1", features = ["derive"], optional = true }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "rayon"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "rayon"] }
+cosmic-text = "0.19"
+moxcms = "0.9"
