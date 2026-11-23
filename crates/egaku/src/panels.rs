@@ -513,11 +513,15 @@ impl App {
                 toggle_vis = Some(i);
             }
 
-            // Thumbnail over a checkerboard.
-            let th = Rect::from_min_size(rect.min + vec2(30.0, 4.0), vec2(44.0, row_h - 8.0));
+            // Thumbnail over a checkerboard, in the document's aspect ratio.
+            let slot = Rect::from_min_size(rect.min + vec2(30.0, 4.0), vec2(44.0, row_h - 8.0));
+            let (dw, dh) = (self.ed.doc.width as f32, self.ed.doc.height as f32);
+            let s = (slot.width() / dw).min(slot.height() / dh);
+            let th =
+                Rect::from_center_size(slot.center(), vec2((dw * s).max(4.0), (dh * s).max(4.0)));
             let p = ui.painter();
-            p.rect_filled(th, 2.0, Color32::from_gray(180));
-            let cell = 6.0;
+            p.rect_filled(th, 0.0, Color32::from_gray(180));
+            let cell = 5.0;
             for cy in 0..((th.height() / cell).ceil() as i32) {
                 for cx in 0..((th.width() / cell).ceil() as i32) {
                     if (cx + cy) % 2 == 0 {
@@ -531,25 +535,18 @@ impl App {
                 }
             }
             if let Some(tex) = self.layer_thumb(ctx, i, &mut budget) {
-                let (dw, dh) = (self.ed.doc.width as f32, self.ed.doc.height as f32);
-                let s = (th.width() / dw).min(th.height() / dh);
-                let r = Rect::from_center_size(th.center(), vec2(dw * s, dh * s));
-                ui.painter().image(
-                    tex,
-                    r,
-                    Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+                let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                ui.painter().image(tex, th, uv, Color32::WHITE);
             }
             ui.painter().rect_stroke(
                 th,
-                2.0,
+                0.0,
                 Stroke::new(1.0, Color32::from_gray(20)),
                 egui::StrokeKind::Outside,
             );
 
             // Name, or an inline editor when renaming.
-            let text_x = th.right() + 8.0;
+            let text_x = slot.right() + 8.0;
             let name_rect = Rect::from_min_max(
                 egui::pos2(text_x, rect.top() + 3.0),
                 egui::pos2(rect.right() - 4.0, rect.top() + 22.0),

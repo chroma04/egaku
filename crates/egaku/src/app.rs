@@ -1178,7 +1178,7 @@ impl App {
                             }
                         }
                         if ui
-                            .small_button("⟲ Swap")
+                            .small_button("Swap")
                             .on_hover_text("Swap width and height")
                             .clicked()
                         {
