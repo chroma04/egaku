@@ -1,0 +1,18 @@
+[package]
+name = "egaku"
+description = "A minimal, fast raster painting app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+egaku-core = { workspace = true, features = ["serde"] }
+rayon.workspace = true
+eframe = { version = "0.37", default-features = false, features = ["wgpu", "wayland", "x11", "default_fonts", "persistence", "accesskit"] }
+serde = { version = "1", features = ["derive"] }
+rfd = "0.18"
+
+[features]
+# Lets `EFRAME_SCREENSHOT_TO=path.png` capture a frame (used for docs/tests).
+screenshot = ["eframe/__screenshot"]
