@@ -274,8 +274,8 @@ fn restrict(
             if na == 0 {
                 n.px[i] = [0; 4];
             } else if na != oa {
-                for ch in 0..3 {
-                    n.px[i][ch] = ((n.px[i][ch] as u32 * oa + na / 2) / na).min(oa) as u8;
+                for c in n.px[i].iter_mut().take(3) {
+                    *c = ((*c as u32 * oa + na / 2) / na).min(oa) as u8;
                 }
                 n.px[i][3] = oa as u8;
             }

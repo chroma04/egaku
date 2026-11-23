@@ -212,7 +212,9 @@ pub fn encode(w: u32, h: u32, rgba: &[u8], format: Format) -> Result<Vec<u8>> {
         Format::Jpeg(q) => {
             // Flatten onto white: JPEG has no alpha.
             let rgb: Vec<u8> = rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .flat_map(|p| {
                     let a = p[3] as u32;
                     [0, 1, 2].map(|i| ((p[i] as u32 * a + 255 * (255 - a) + 127) / 255) as u8)

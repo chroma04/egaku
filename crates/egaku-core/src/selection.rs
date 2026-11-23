@@ -321,7 +321,7 @@ impl Selection {
                     }
                 }
                 xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                for pair in xs.chunks_exact(2) {
+                for pair in xs.as_chunks::<2>().0 {
                     let (mut l, mut r) = (pair[0].clamp(0.0, w), pair[1].clamp(0.0, w));
                     if !antialias {
                         // Pixel centres inside the span are fully covered.
