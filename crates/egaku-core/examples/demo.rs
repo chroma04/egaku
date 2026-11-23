@@ -18,23 +18,15 @@ fn photo(w: u32, h: u32) -> Vec<u8> {
     for y in 0..h {
         for x in 0..w {
             let (fx, fy) = (x as f32 / w as f32, y as f32 / h as f32);
-            let mut c = [
-                (70.0 + 150.0 * fy) as f32,
-                (120.0 + 90.0 * fy) as f32,
-                (200.0 - 20.0 * fy) as f32,
-            ];
+            let mut c = [70.0 + 150.0 * fy, 120.0 + 90.0 * fy, 200.0 - 20.0 * fy];
             let d = ((fx - 0.7).powi(2) + (fy - 0.35).powi(2)).sqrt();
             let sun = (1.0 - d / 0.12).clamp(0.0, 1.0);
             for (i, s) in [255.0, 236.0, 190.0].iter().enumerate() {
                 c[i] += (s - c[i]) * sun.powf(0.6);
             }
-            for (k, col) in [
-                [64.0, 110.0, 90.0],
-                [40.0, 80.0, 70.0],
-                [26, 52, 50].map(|v| v as f32),
-            ]
-            .iter()
-            .enumerate()
+            for (k, col) in [[64.0, 110.0, 90.0], [40.0, 80.0, 70.0], [26.0, 52.0, 50.0]]
+                .iter()
+                .enumerate()
             {
                 let k = k as f32;
                 let hill = 0.55 + k * 0.12 + (fx * (5.0 + k * 3.0) + k).sin() * 0.05;
