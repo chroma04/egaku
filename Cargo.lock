@@ -949,9 +949,12 @@ dependencies = [
 name = "egaku"
 version = "0.1.0"
 dependencies = [
+ "block2 0.6.2",
  "eframe",
  "egaku-core",
  "egui-pop-phosphor",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
  "octotablet",
  "rayon",
  "rfd",
