@@ -4,6 +4,7 @@ description = "Document model, tile engine, brush engine and file formats for eg
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 rayon.workspace = true

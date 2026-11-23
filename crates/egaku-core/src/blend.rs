@@ -103,13 +103,12 @@ pub fn blend_tile(dst: &mut Tile, src: &Tile, opacity: u8, mode: BlendMode) {
 }
 
 fn normal(dst: &mut Tile, src: &Tile, opacity: u8) {
-    let d = dst.as_bytes_mut();
-    let s = src.as_bytes();
+    let pairs = dst.px.iter_mut().zip(src.px.iter());
     if opacity == 255 {
-        for (d, s) in d.chunks_exact_mut(4).zip(s.chunks_exact(4)) {
+        for (d, s) in pairs {
             let inv = 255 - s[3] as u32;
             if inv == 0 {
-                d.copy_from_slice(s);
+                *d = *s;
             } else if inv != 255 {
                 for c in 0..4 {
                     d[c] = (s[c] as u32 + div255(d[c] as u32 * inv)) as u8;
@@ -118,7 +117,7 @@ fn normal(dst: &mut Tile, src: &Tile, opacity: u8) {
         }
     } else {
         let o = opacity as u32;
-        for (d, s) in d.chunks_exact_mut(4).zip(s.chunks_exact(4)) {
+        for (d, s) in pairs {
             if s[3] == 0 {
                 continue;
             }

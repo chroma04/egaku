@@ -41,8 +41,9 @@ fn crop_rgba(grid: &TileGrid, width: u32, height: u32) -> Option<(u32, u32, u32,
                 let ox = ((tx * t - x0) * 4) as usize;
                 let n = (t.min(width - tx * t)) as usize;
                 let src = &tile.px[ly * TILE..ly * TILE + n];
-                for (d, p) in line[ox..ox + n * 4].chunks_exact_mut(4).zip(src) {
-                    d.copy_from_slice(&unpremultiply(*p));
+                let (dst, _) = line[ox..ox + n * 4].as_chunks_mut::<4>();
+                for (d, p) in dst.iter_mut().zip(src) {
+                    *d = unpremultiply(*p);
                 }
             }
         });
