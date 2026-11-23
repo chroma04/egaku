@@ -319,6 +319,19 @@ impl TileGrid {
         g
     }
 
+    /// A grid of a different size holding this one's pixels offset by
+    /// `(dx, dy)` (for canvas resizing and cropping).
+    pub fn reframed(&self, width: u32, height: u32, dx: i64, dy: i64) -> TileGrid {
+        let mut g = TileGrid::new(width, height);
+        for c in g.full_rect().iter() {
+            if let Some(t) = self.shifted_tile(c, dx, dy) {
+                g.set(c, Some(Arc::new(t)));
+            }
+        }
+        crate::transform::crop_to_canvas(&mut g, width, height);
+        g
+    }
+
     /// Approximate heap memory used by the tiles of this grid that are not
     /// shared with anyone else.
     pub fn unique_bytes(&self) -> usize {

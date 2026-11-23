@@ -11,38 +11,134 @@
 //! GPU with more than a screenful of pixels, and its downsampling is a correct
 //! box filter rather than GPU aliasing.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use rayon::prelude::*;
 
 use crate::blend::blend_tile;
-use crate::brush::{Mask, Paint, apply_mask_tile};
-use crate::document::Document;
+use crate::document::{Document, Layer, LayerId};
 use crate::tile::{TILE, Tile, TileCoord, TileRect, tiles_for};
 
-/// A temporary modification of one layer that is shown but not yet committed.
-#[derive(Copy, Clone)]
-pub enum Override<'a> {
-    None,
-    Stroke {
-        layer: usize,
-        mask: &'a Mask,
-        paint: Paint,
-    },
-    Offset {
-        layer: usize,
-        dx: i64,
-        dy: i64,
-    },
+/// A temporary modification of the document that is shown but not yet
+/// committed: a stroke in progress, a layer being moved or transformed, an
+/// adjustment being previewed, onion skins.
+pub trait Ov: Sync {
+    /// The layer being modified, if any. Everything below its root-level
+    /// ancestor is cached while the override lasts.
+    fn layer(&self) -> Option<LayerId>;
+    /// Replacement pixels for one tile of `l`: `None` if `l` isn't
+    /// overridden, `Some(None)` if the tile becomes empty.
+    fn tile(&self, l: &Layer, c: TileCoord) -> Option<Option<Tile>>;
+    /// Draws anything that should appear directly beneath `l` (onion skins).
+    fn under(&self, _l: &Layer, _c: TileCoord, _out: &mut Tile) {}
 }
 
-impl Override<'_> {
-    fn layer(&self) -> Option<usize> {
-        match *self {
-            Override::None => None,
-            Override::Stroke { layer, .. } | Override::Offset { layer, .. } => Some(layer),
+/// No modification.
+pub struct NoOverride;
+
+impl Ov for NoOverride {
+    fn layer(&self) -> Option<LayerId> {
+        None
+    }
+    fn tile(&self, _: &Layer, _: TileCoord) -> Option<Option<Tile>> {
+        None
+    }
+}
+
+/// The pixels a layer contributes to one tile, before its own opacity and
+/// blend mode: its tiles, or for a group its children composited in
+/// isolation.
+pub fn layer_content<'a>(l: &'a Layer, c: TileCoord, ov: &dyn Ov) -> Option<Cow<'a, Tile>> {
+    if let Some(t) = ov.tile(l, c) {
+        return t.map(Cow::Owned);
+    }
+    match &l.content {
+        crate::document::Content::Group { children, .. } => {
+            if !children.iter().any(|ch| ch.is_shown()) {
+                return None;
+            }
+            let mut t = Tile::filled([0; 4]);
+            compose_list(children, c, &mut t, ov);
+            if t.is_empty() { None } else { Some(Cow::Owned(t)) }
+        }
+        _ => l.tiles.get(c).map(|t| Cow::Borrowed(&**t)),
+    }
+}
+
+/// Composites a list of sibling layers (bottom first) onto `out`.
+///
+/// A run of clipped layers paints inside the alpha of the unclipped layer
+/// beneath it (its base), as if the base were opaque; the base's alpha,
+/// opacity and blend mode then apply to the result, as in Photoshop.
+pub fn compose_list(layers: &[Layer], c: TileCoord, out: &mut Tile, ov: &dyn Ov) {
+    let n = layers.len();
+    let mut i = 0;
+    while i < n {
+        let base = &layers[i];
+        let mut j = i + 1;
+        while j < n && layers[j].clip {
+            j += 1;
+        }
+        if base.is_shown() {
+            ov.under(base, c, out);
+            if let Some(t) = layer_content(base, c, ov) {
+                let clips = &layers[i + 1..j];
+                if clips.iter().any(|l| l.is_shown()) {
+                    let mut t = t.into_owned();
+                    apply_clips(&mut t, clips, c, ov);
+                    blend_tile(out, &t, base.opacity_u8(), base.blend);
+                } else {
+                    blend_tile(out, &t, base.opacity_u8(), base.blend);
+                }
+            }
+        }
+        i = j;
+    }
+}
+
+fn apply_clips(base: &mut Tile, clips: &[Layer], c: TileCoord, ov: &dyn Ov) {
+    // Remember the base's alpha and make it opaque.
+    let mut alpha = [0u8; crate::tile::TILE_PX];
+    for (a, p) in alpha.iter_mut().zip(base.px.iter_mut()) {
+        *a = p[3];
+        *p = match p[3] {
+            0 => [0; 4],
+            255 => *p,
+            _ => {
+                let u = crate::color::unpremultiply(*p);
+                [u[0], u[1], u[2], 255]
+            }
+        };
+    }
+    for l in clips {
+        if !l.is_shown() {
+            continue;
+        }
+        ov.under(l, c, base);
+        if let Some(t) = layer_content(l, c, ov) {
+            blend_tile(base, &t, l.opacity_u8(), l.blend);
         }
     }
+    for (a, p) in alpha.iter().zip(base.px.iter_mut()) {
+        *p = match *a {
+            0 => [0; 4],
+            255 => *p,
+            a => crate::color::premultiply([p[0], p[1], p[2], a]),
+        };
+    }
+}
+
+/// Index of the root-level layer whose clipping stack contains `id`
+/// (the stack's base).
+fn root_unit_start(doc: &Document, id: LayerId) -> Option<usize> {
+    let root = doc.ancestors(id).first().copied().unwrap_or(id);
+    let layers = doc.layers();
+    let mut i = layers.iter().position(|l| l.id == root)?;
+    while i > 0 && layers[i].clip {
+        i -= 1;
+    }
+    Some(i)
 }
 
 struct Level {
@@ -72,7 +168,7 @@ pub struct Projection {
     height: u32,
     levels: Vec<Level>,
     below: HashMap<TileCoord, Box<Tile>>,
-    below_layer: Option<usize>,
+    below_key: Option<(LayerId, usize)>,
     changed: Vec<(u8, TileCoord)>,
 }
 
@@ -93,7 +189,7 @@ impl Projection {
             height,
             levels,
             below: HashMap::new(),
-            below_layer: None,
+            below_key: None,
             changed: vec![],
         }
     }
@@ -159,7 +255,7 @@ impl Projection {
     /// whenever layers beneath the active one may have changed.
     pub fn reset_below_cache(&mut self) {
         self.below.clear();
-        self.below_layer = None;
+        self.below_key = None;
     }
 
     /// Whether any composite work is still pending.
@@ -173,7 +269,7 @@ impl Projection {
     pub fn update(
         &mut self,
         doc: &Document,
-        ov: Override,
+        ov: &dyn Ov,
         visible: Option<TileRect>,
         budget: usize,
     ) -> bool {
@@ -204,17 +300,18 @@ impl Projection {
     }
 
     /// Processes all pending work.
-    pub fn update_all(&mut self, doc: &Document, ov: Override) {
+    pub fn update_all(&mut self, doc: &Document, ov: &dyn Ov) {
         self.update(doc, ov, None, usize::MAX);
     }
 
-    fn compose(&mut self, doc: &Document, ov: Override, todo: &[TileCoord]) {
+    fn compose(&mut self, doc: &Document, ov: &dyn Ov, todo: &[TileCoord]) {
         let layers = doc.layers();
-        // Fill the below-active cache for tiles that lack it.
-        if let Some(active) = ov.layer() {
-            if self.below_layer != Some(active) {
+        let start = ov.layer().and_then(|id| root_unit_start(doc, id));
+        // Fill the below-the-edit cache for tiles that lack it.
+        if let (Some(id), Some(start)) = (ov.layer(), start) {
+            if self.below_key != Some((id, start)) {
                 self.below.clear();
-                self.below_layer = Some(active);
+                self.below_key = Some((id, start));
             }
             let missing: Vec<TileCoord> = todo
                 .iter()
@@ -225,13 +322,7 @@ impl Projection {
                 .par_iter()
                 .map(|&c| {
                     let mut t = Box::new(Tile::filled(doc.paper_px()));
-                    for l in &layers[..active] {
-                        if l.is_shown()
-                            && let Some(src) = l.tiles.get(c)
-                        {
-                            blend_tile(&mut t, src, l.opacity_u8(), l.blend);
-                        }
-                    }
+                    compose_list(&layers[..start], c, &mut t, &NoOverride);
                     (c, t)
                 })
                 .collect();
@@ -242,39 +333,11 @@ impl Projection {
         let results: Vec<(TileCoord, Option<Box<Tile>>)> = todo
             .par_iter()
             .map(|&c| {
-                let (mut out, start) = match ov.layer() {
-                    Some(a) => (below[&c].clone(), a),
+                let (mut out, from) = match start {
+                    Some(s) => (below[&c].clone(), s),
                     None => (Box::new(Tile::filled(doc.paper_px())), 0),
                 };
-                for (i, l) in layers.iter().enumerate().skip(start) {
-                    if !l.is_shown() {
-                        continue;
-                    }
-                    let (op, mode) = (l.opacity_u8(), l.blend);
-                    match ov {
-                        Override::Stroke { layer, mask, paint } if layer == i => {
-                            if let Some(m) = mask.get(c) {
-                                let mut t = l
-                                    .tiles
-                                    .get(c)
-                                    .map_or_else(|| Tile::filled([0; 4]), |t| (**t).clone());
-                                apply_mask_tile(&mut t, m, &paint);
-                                blend_tile(&mut out, &t, op, mode);
-                                continue;
-                            }
-                        }
-                        Override::Offset { layer, dx, dy } if layer == i => {
-                            if let Some(t) = l.tiles.shifted_tile(c, dx, dy) {
-                                blend_tile(&mut out, &t, op, mode);
-                            }
-                            continue;
-                        }
-                        _ => {}
-                    }
-                    if let Some(t) = l.tiles.get(c) {
-                        blend_tile(&mut out, t, op, mode);
-                    }
-                }
+                compose_list(&layers[from..], c, &mut out, ov);
                 let out = if doc.state.paper.is_none() && out.is_empty() {
                     None
                 } else {
@@ -408,59 +471,41 @@ pub fn flatten(doc: &Document) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brush::{Dab, PaintMode};
 
     #[test]
     fn stroke_preview_matches_commit() {
+        use crate::brush::{BrushParams, Paint, PaintMode};
         let mut doc = Document::new(300, 200, Some([255, 255, 255]));
         let top = doc.new_layer("top");
         doc.state.layers.push(top);
         doc.state.layers[1].opacity = 0.5;
-        let mut proj = Projection::new(300, 200);
-        proj.update_all(&doc, Override::None);
-        assert_eq!(proj.pixel(10, 10), [255, 255, 255, 255]);
-
-        let mut mask = Mask::new(300, 200);
-        let mut dirty = vec![];
-        mask.stamp(
-            &Dab {
-                x: 100.0,
-                y: 100.0,
-                radius: 40.0,
-                hardness: 0.5,
-                flow: 1.0,
-                cap: 1.0,
-            },
-            &mut dirty,
-        );
-        let paint = Paint {
+        let bottom = doc.state.layers[0].id;
+        let mut ed = crate::editor::Editor::new(doc);
+        ed.select_layer(bottom);
+        ed.update_projection(None, usize::MAX);
+        assert_eq!(ed.projection.pixel(10, 10), [255, 255, 255, 255]);
+        let p = Paint {
             color: [0, 0, 0],
             mode: PaintMode::Paint,
             alpha_lock: false,
         };
-        proj.invalidate_many(dirty.iter().copied());
-        proj.update_all(
-            &doc,
-            Override::Stroke {
-                layer: 0,
-                mask: &mask,
-                paint,
-            },
-        );
-        let preview: Vec<_> = (0..200).map(|x| proj.pixel(x, 100)).collect();
-
-        // Commit and recomposite without override.
-        let grid = doc.state.layers[0].tiles_mut();
-        for &c in mask.touched() {
-            apply_mask_tile(grid.get_mut_or_insert(c), mask.get(c).unwrap(), &paint);
-        }
-        proj.reset_below_cache();
-        proj.invalidate_all();
-        proj.update_all(&doc, Override::None);
-        let committed: Vec<_> = (0..200).map(|x| proj.pixel(x, 100)).collect();
+        let b = BrushParams {
+            size: 80.0,
+            hardness: 0.5,
+            pressure_size: false,
+            smoothing: 0.0,
+            ..Default::default()
+        };
+        ed.begin_stroke(b, p, 100.0, 100.0, 1.0).unwrap();
+        ed.update_projection(None, usize::MAX);
+        let preview: Vec<_> = (0..200).map(|x| ed.projection.pixel(x, 100)).collect();
+        ed.end_stroke();
+        ed.invalidate_all();
+        ed.update_projection(None, usize::MAX);
+        let committed: Vec<_> = (0..200).map(|x| ed.projection.pixel(x, 100)).collect();
         assert_eq!(preview, committed);
-        assert_eq!(proj.pixel(100, 100), [0, 0, 0, 255]);
-        assert!(!proj.has_pending());
+        assert_eq!(ed.projection.pixel(100, 100), [0, 0, 0, 255]);
+        assert!(!ed.projection.has_pending());
     }
 
     #[test]
@@ -469,7 +514,7 @@ mod tests {
         let g = doc.state.layers[0].tiles_mut();
         *g.get_mut_or_insert(TileCoord::new(0, 0)) = Tile::filled([200, 100, 0, 200]);
         let mut proj = Projection::new(256, 256);
-        proj.update_all(&doc, Override::None);
+        proj.update_all(&doc, &NoOverride);
         assert_eq!(proj.level_count(), 3);
         // Level 1 tile 0 holds the 64px tile in its top-left quadrant.
         let t = proj.tile(1, TileCoord::new(0, 0)).unwrap();
@@ -489,10 +534,10 @@ mod tests {
             x1: 2,
             y1: 2,
         };
-        assert!(proj.update(&doc, Override::None, Some(vis), 0));
+        assert!(proj.update(&doc, &NoOverride, Some(vis), 0));
         assert_eq!(proj.pixel(10, 10), [1, 2, 3, 255]);
         assert_eq!(proj.pixel(1000, 1000), [0; 4]);
-        proj.update_all(&doc, Override::None);
+        proj.update_all(&doc, &NoOverride);
         assert_eq!(proj.pixel(1000, 1000), [1, 2, 3, 255]);
     }
 }
