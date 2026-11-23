@@ -65,6 +65,8 @@ pub struct TextObject {
     pub transform: Affine,
     /// Laid-out box size in text-box coordinates; filled in by rendering.
     pub bbox: (f32, f32),
+    /// Aliased glyphs on whole pixels, scaled up as hard blocks (pixel art).
+    pub pixel: bool,
 }
 
 impl Default for TextObject {
@@ -81,6 +83,7 @@ impl Default for TextObject {
             wrap: None,
             transform: Affine::IDENTITY,
             bbox: (0.0, 0.0),
+            pixel: false,
         }
     }
 }
@@ -192,8 +195,13 @@ impl TextObject {
         );
         let mut rgba = vec![0u8; (w * hh * 4) as usize];
         let [r, g, b] = self.color;
+        let pixel = self.pixel;
         buf.draw(system, cache, Color::rgb(r, g, b), |x, y, gw, gh, c| {
-            let a = c.a() as u32;
+            let mut a = c.a() as u32;
+            if pixel {
+                // Each pixel is either ink or paper.
+                a = if a >= 128 { 255 } else { 0 };
+            }
             if a == 0 {
                 return;
             }
@@ -226,13 +234,24 @@ impl TextObject {
     pub fn render(&mut self, width: u32, height: u32) -> TileGrid {
         let (sx, sy) = self.transform.scales();
         // Rasterise at the final scale so text stays sharp when enlarged.
-        let scale = sx.max(sy).clamp(0.02, 16.0);
+        // Pixel text is set at its own size and enlarged as blocks, the way
+        // pixel fonts are meant to be seen.
+        let scale = if self.pixel {
+            1.0
+        } else {
+            sx.max(sy).clamp(0.02, 16.0)
+        };
         let (w, h, rgba, pad, bbox) = self.rasterize(scale);
         self.bbox = bbox;
         let src = Source::from_rgba(w, h, &rgba);
         let local = Affine::scale(1.0 / scale, 1.0 / scale).compose(Affine::translate(-pad, -pad));
-        let m = self.transform.compose(local);
-        src.render(&m, true, width, height)
+        let mut m = self.transform.compose(local);
+        if self.pixel {
+            // Keep glyph pixels on the canvas grid.
+            m.m[4] = m.m[4].round();
+            m.m[5] = m.m[5].round();
+        }
+        src.render(&m, !self.pixel, width, height)
     }
 }
 
@@ -258,5 +277,12 @@ mod tests {
         assert!(t.bbox.0 > 40.0 && t.bbox.1 > 80.0, "{:?}", t.bbox);
         // Nothing above or left of the transform origin minus overhang.
         assert_eq!(g.pixel(2, 2), [0; 4]);
+        // Pixel text has no partly covered pixels.
+        t.pixel = true;
+        let g = t.render(400, 300);
+        assert!(!g.is_empty());
+        for (_, tile) in g.iter() {
+            assert!(tile.px.iter().all(|p| p[3] == 0 || p[3] == 255));
+        }
     }
 }

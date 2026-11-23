@@ -53,7 +53,12 @@ impl App {
     /// Whether the active layer shows transform handles under the move tool.
     pub fn shows_handles(&self) -> bool {
         self.free_transform
+            || self
+                .ed
+                .transforming()
+                .is_some_and(|t| t.layers().count() > 1)
             || (self.prefs.tool == Tool::Move
+                && self.ed.selection_count() == 1
                 && matches!(self.ed.doc.active_layer().kind(), Kind::Text | Kind::Image))
     }
 
@@ -94,7 +99,14 @@ impl App {
             self.textures.clear();
             self.thumbs.clear();
             self.sel_outline = None;
-            self.fit_pending = true;
+            if std::mem::take(&mut self.keep_view) {
+                // Keep zoom and rotation; just make sure the canvas is in reach.
+                let (w, h) = (self.ed.doc.width as f32, self.ed.doc.height as f32);
+                self.view.center.x = self.view.center.x.clamp(0.0, w);
+                self.view.center.y = self.view.center.y.clamp(0.0, h);
+            } else {
+                self.fit_pending = true;
+            }
         }
         if self.fit_pending && vp.width() > 64.0 {
             self.view
@@ -356,6 +368,17 @@ impl App {
                 Tool::Select => {
                     let op = self.select_op(m);
                     self.press_op = op;
+                    // Dragging inside the selection (with no modifier) moves
+                    // the outline; the pixels stay where they are.
+                    let inside = !m.shift
+                        && !m.alt
+                        && self.ed.selection().is_some_and(|s| {
+                            s.value(c.x.floor() as i64, c.y.floor() as i64) >= 128
+                        });
+                    if inside {
+                        self.gesture = Gesture::MoveSelection { start: c, end: c };
+                        return;
+                    }
                     match self.prefs.select_shape {
                         SelectShape::Rect | SelectShape::Ellipse => {
                             self.gesture = Gesture::SelectBox { start: c, end: c }
@@ -363,6 +386,18 @@ impl App {
                         SelectShape::Lasso => {
                             self.lasso = vec![c];
                             self.gesture = Gesture::Lasso;
+                        }
+                        SelectShape::Color => {
+                            if c.x >= 0.0 && c.y >= 0.0 {
+                                self.ed.select_color(
+                                    c.x as u32,
+                                    c.y as u32,
+                                    self.prefs.color_tolerance,
+                                    self.prefs.select_antialias,
+                                    self.prefs.wand_sample_all,
+                                    op,
+                                );
+                            }
                         }
                         SelectShape::Wand => {
                             if c.x >= 0.0 && c.y >= 0.0 {
@@ -436,9 +471,13 @@ impl App {
             && !m.command
             && let Some(id) = self.layer_at(c.x, c.y)
         {
-            self.ed.select_layer(id);
+            // Picking a layer that is already selected keeps the others too.
+            let keep = self.ed.is_layer_selected(id) && self.ed.selection_count() > 1;
+            if !keep {
+                self.ed.select_layer(id);
+            }
             // An object picked this way can be dragged by its frame at once.
-            if matches!(self.ed.doc.active_layer().kind(), Kind::Text | Kind::Image) {
+            if !keep && matches!(self.ed.doc.active_layer().kind(), Kind::Text | Kind::Image) {
                 if self.ed.begin_transform(self.prefs.smooth_transform).is_ok() {
                     self.gesture = Gesture::Handle {
                         handle: Handle::Inside,
@@ -477,11 +516,16 @@ impl App {
                     None
                 }
             });
-        if let Some(te) = &self.text_edit
-            && te.layer.is_some()
-            && te.layer == target
-        {
-            return;
+        if let Some(te) = &self.text_edit {
+            if te.layer.is_some() && te.layer == target {
+                return;
+            }
+            // Clicking away from the text being typed finishes it; the next
+            // click starts new text.
+            self.finish_modes();
+            if target.is_none() {
+                return;
+            }
         }
         self.finish_modes();
         if let Some(id) = target {
@@ -510,6 +554,7 @@ impl App {
                 wrap: None,
                 transform: Affine::translate(c.x.round(), (c.y - size * 0.75).round()),
                 bbox: (size * 0.5, size * t.line_height),
+                pixel: t.pixel,
             };
             self.text_edit = Some(TextEditing { layer: None, obj });
         }
@@ -599,8 +644,8 @@ impl App {
                         m.shift,
                     );
                     let smooth = self.prefs.smooth_transform;
-                    let d = if handle == Handle::Inside && self.ed.doc.active_layer().is_paintable()
-                    {
+                    let raster = self.ed.transforming().is_some_and(|t| t.is_raster());
+                    let d = if handle == Handle::Inside && raster {
                         // Whole-pixel moves keep raster pixels crisp.
                         let mut d = d;
                         d.m[4] = d.m[4].round();
@@ -649,6 +694,18 @@ impl App {
                 self.crop = Some(handles::drag_rect(handle, start_rect, c - start, w, h));
             }
             Gesture::Pick => self.pick(c),
+            Gesture::MoveSelection { start, .. } => {
+                let mut end = c;
+                if m.shift {
+                    let d = c - start;
+                    if d.x.abs() > d.y.abs() {
+                        end.y = start.y;
+                    } else {
+                        end.x = start.x;
+                    }
+                }
+                self.gesture = Gesture::MoveSelection { start, end };
+            }
         }
     }
 
@@ -716,6 +773,36 @@ impl App {
                 }
             }
             Gesture::Pick => self.prefs.remember_color(self.prefs.fg),
+            Gesture::MoveSelection { start, end } => {
+                let (dx, dy) = ((end.x - start.x).round(), (end.y - start.y).round());
+                if dx != 0.0 || dy != 0.0 {
+                    self.ed.translate_selection(dx as i64, dy as i64);
+                } else if self.prefs.select_shape == SelectShape::Color {
+                    if start.x >= 0.0 && start.y >= 0.0 {
+                        self.ed.select_color(
+                            start.x as u32,
+                            start.y as u32,
+                            self.prefs.color_tolerance,
+                            self.prefs.select_antialias,
+                            self.prefs.wand_sample_all,
+                            self.select_mode,
+                        );
+                    }
+                } else if self.prefs.select_shape == SelectShape::Wand {
+                    // A click (not a drag) inside still means "select here".
+                    if start.x >= 0.0 && start.y >= 0.0 {
+                        self.ed.magic_wand(
+                            start.x as u32,
+                            start.y as u32,
+                            self.prefs.wand_tolerance,
+                            self.prefs.wand_sample_all,
+                            self.select_mode,
+                        );
+                    }
+                } else if self.select_mode == SelectOp::Replace {
+                    self.ed.deselect();
+                }
+            }
             _ => {}
         }
         self.gesture = Gesture::None;
@@ -840,33 +927,35 @@ impl App {
             self.modal = Some(Modal::Export);
         }
         if sc(cs, Key::Z) || sc(cmd, Key::Y) {
-            self.cancel_modes();
-            self.ed.redo();
+            self.redo();
         }
         if sc(cmd, Key::Z) {
             if self.free_transform || self.crop.is_some() {
                 self.cancel_modes();
             } else {
-                self.cancel_modes();
-                self.ed.undo();
+                self.undo();
             }
         }
         let active = self.ed.doc.active_id();
         if sc(cs, Key::N) {
             self.ed.add_layer();
         }
+        let ids = self.ed.selected_layers();
         if sc(cmd, Key::J) {
+            self.finish_modes();
             if self.ed.selection().is_some() {
                 self.ed.layer_via_copy();
             } else {
-                self.ed.duplicate_layer(active);
+                self.ed.duplicate_layers(&ids);
             }
         }
         if sc(cmd, Key::E) {
-            self.ed.merge_down(active);
+            self.finish_modes();
+            self.ed.merge_selected();
         }
         if sc(cmd, Key::G) {
-            self.ed.group_layer(active);
+            self.finish_modes();
+            self.ed.group_layers(&ids);
         }
         if sc(cs, Key::G) {
             self.ed.ungroup(active);
@@ -957,6 +1046,10 @@ impl App {
             self.prefs.select_shape = SelectShape::Wand;
             self.set_tool(Tool::Select);
         }
+        if shift_key(Key::W) {
+            self.prefs.select_shape = SelectShape::Color;
+            self.set_tool(Tool::Select);
+        }
         if key(Key::X) {
             self.swap_colors();
         }
@@ -986,7 +1079,10 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
         }
         if (key(Key::Delete) || key(Key::Backspace))
-            && let Err(r) = self.ed.clear_selected()
+            && let Err(r) = {
+                self.finish_modes();
+                self.ed.delete_key()
+            }
         {
             self.refusal(ctx, r);
         }
@@ -996,9 +1092,50 @@ impl App {
                 self.refusal(ctx, r);
             }
         }
+        // Arrow keys nudge: the selection outline with the select tool, the
+        // layer (or selected pixels) with the move tool. Shift: 10 px.
+        for (k, dx, dy) in [
+            (Key::ArrowLeft, -1, 0),
+            (Key::ArrowRight, 1, 0),
+            (Key::ArrowUp, 0, -1),
+            (Key::ArrowDown, 0, 1),
+        ] {
+            let n = if shift_key(k) {
+                10
+            } else if key(k) {
+                1
+            } else {
+                continue;
+            };
+            let (dx, dy) = (dx * n, dy * n);
+            match self.prefs.tool {
+                Tool::Select => self.ed.translate_selection(dx as i64, dy as i64),
+                Tool::Move if self.gesture == Gesture::None => {
+                    if self.free_transform {
+                        if let Some(d) = self.ed.transforming().map(|t| t.delta) {
+                            let d = Affine::translate(dx as f32, dy as f32).compose(d);
+                            self.ed.set_transform(d, self.prefs.smooth_transform);
+                        }
+                    } else {
+                        match self.ed.begin_transform(false) {
+                            Ok(()) => {
+                                self.ed
+                                    .set_transform(Affine::translate(dx as f32, dy as f32), false);
+                                self.ed.commit_transform();
+                            }
+                            Err(r) => self.refusal(ctx, r),
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         if key(Key::Slash) {
             self.ed
                 .set_layer(active, "Alpha lock", |l| l.alpha_lock = !l.alpha_lock);
+        }
+        if key(Key::F5) {
+            self.toggle_brush_editor();
         }
         if key(Key::F1) {
             self.modal = Some(Modal::Shortcuts);
@@ -1052,7 +1189,7 @@ impl App {
 pub const SHORTCUTS: &[(&str, &str)] = &[
     (
         "V  M  L  W  C",
-        "Move, Select (M again: ellipse), Lasso, Magic wand, Crop",
+        "Move, Select (M again: ellipse), Lasso, Magic wand, Crop · Shift+W: select by colour",
     ),
     ("B  E  G  ⇧G  T", "Brush, Eraser, Fill, Gradient, Text"),
     ("I  H", "Eyedropper, Hand"),
@@ -1065,6 +1202,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Shift + click", "Straight line from the last stroke"),
     ("[  ]  ·  Shift + [  ]", "Brush size · hardness"),
     ("1 … 0", "Brush opacity 10% … 100%"),
+    ("F5", "Brush editor"),
     ("X / D", "Swap / reset colours"),
     ("Ctrl+T", "Free transform (Enter applies, Esc cancels)"),
     (
@@ -1075,12 +1213,23 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
         "Shift / Alt while selecting",
         "Add to / subtract from selection",
     ),
-    ("Del  ·  Alt+Del", "Clear selection · fill with colour"),
+    (
+        "Del  ·  Alt+Del",
+        "Clear selection (deletes text, images and groups) · fill with colour",
+    ),
     (
         "Ctrl+C / X / V",
         "Copy / cut / paste (Ctrl+Shift+C copies merged)",
     ),
+    (
+        "Arrows  ·  Shift+Arrows",
+        "Nudge layer (move tool) or selection outline (select tool) by 1 · 10 px",
+    ),
     ("Ctrl+J", "Duplicate layer (or copy selection to a layer)"),
+    (
+        "Ctrl / Shift + click layer",
+        "Select several layers · a range of layers",
+    ),
     ("Ctrl+G / Ctrl+Shift+G", "Group / ungroup"),
     ("Ctrl+Alt+G", "Clip to layer below"),
     ("Ctrl+E", "Merge down"),

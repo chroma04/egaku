@@ -178,6 +178,9 @@ pub fn save_to_vec(doc: &Document) -> Result<Vec<u8>> {
                     if t.italic {
                         extra += " egaku:italic=\"true\"";
                     }
+                    if t.pixel {
+                        extra += " egaku:pixel=\"true\"";
+                    }
                     if let Some(ww) = t.wrap {
                         extra += &format!(" egaku:wrap=\"{ww}\"");
                     }
@@ -517,6 +520,7 @@ pub fn load_from_reader<R: Read + std::io::Seek>(r: R) -> Result<Document> {
                                     .and_then(parse_affine)
                                     .unwrap_or_default(),
                                 bbox: (0.0, 0.0),
+                                pixel: t("egaku:pixel"),
                             };
                             let mut obj = obj;
                             // Re-render to recover the box; fall back to the
@@ -672,6 +676,7 @@ mod tests {
             size: 20.0,
             color: [10, 20, 30],
             bold: true,
+            pixel: true,
             transform: Affine::translate(5.0, 6.0),
             ..Default::default()
         });
@@ -716,6 +721,7 @@ mod tests {
             Content::Text(t) => {
                 assert_eq!(t.text, "Hi\nthere & <you>");
                 assert!(t.bold);
+                assert!(t.pixel);
                 assert_eq!(t.color, [10, 20, 30]);
                 assert_eq!(t.transform, Affine::translate(5.0, 6.0));
             }

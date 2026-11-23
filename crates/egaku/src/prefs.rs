@@ -89,7 +89,9 @@ impl Tool {
     pub fn blurb(self) -> &'static str {
         match self {
             Tool::Move => "Drag to move the layer or selection. Ctrl+T to scale and rotate.",
-            Tool::Select => "Drag to select. Shift adds, Alt subtracts.",
+            Tool::Select => {
+                "Drag to select; drag inside the selection to move its outline. Shift adds, Alt subtracts."
+            }
             Tool::Brush => "Paint. Shift-click draws a straight line.",
             Tool::Eraser => "Erase to transparency.",
             Tool::Fill => "Fill an area of similar colour.",
@@ -108,14 +110,17 @@ pub enum SelectShape {
     Ellipse,
     Lasso,
     Wand,
+    /// Every pixel of a colour, wherever it is.
+    Color,
 }
 
 impl SelectShape {
-    pub const ALL: [SelectShape; 4] = [
+    pub const ALL: [SelectShape; 5] = [
         SelectShape::Rect,
         SelectShape::Ellipse,
         SelectShape::Lasso,
         SelectShape::Wand,
+        SelectShape::Color,
     ];
 
     pub fn name(self) -> &'static str {
@@ -124,6 +129,7 @@ impl SelectShape {
             SelectShape::Ellipse => "Ellipse",
             SelectShape::Lasso => "Lasso",
             SelectShape::Wand => "Magic wand",
+            SelectShape::Color => "Colour",
         }
     }
 
@@ -133,6 +139,7 @@ impl SelectShape {
             SelectShape::Ellipse => ph::CIRCLE_DASHED,
             SelectShape::Lasso => ph::LASSO,
             SelectShape::Wand => ph::MAGIC_WAND,
+            SelectShape::Color => ph::EYEDROPPER_SAMPLE,
         }
     }
 
@@ -141,6 +148,7 @@ impl SelectShape {
             SelectShape::Rect | SelectShape::Ellipse => "M",
             SelectShape::Lasso => "L",
             SelectShape::Wand => "W",
+            SelectShape::Color => "Shift+W",
         }
     }
 }
@@ -157,7 +165,7 @@ pub struct Preset {
     pub params: BrushParams,
 }
 
-pub fn presets() -> [Preset; 6] {
+pub fn presets() -> [Preset; 10] {
     let d = BrushParams::default();
     [
         Preset {
@@ -226,7 +234,70 @@ pub fn presets() -> [Preset; 6] {
                 ..d
             },
         },
+        Preset {
+            name: "Calligraphy",
+            params: BrushParams {
+                size: 22.0,
+                hardness: 0.95,
+                roundness: 0.18,
+                angle: 40.0,
+                min_size: 0.4,
+                spacing: 0.04,
+                smoothing: 0.4,
+                ..d
+            },
+        },
+        Preset {
+            name: "Chalk",
+            params: BrushParams {
+                size: 26.0,
+                hardness: 0.75,
+                grain: 0.85,
+                grain_scale: 4.0,
+                pressure_size: false,
+                pressure_opacity: true,
+                roundness: 0.7,
+                angle_jitter: 0.3,
+                smoothing: 0.15,
+                ..d
+            },
+        },
+        Preset {
+            name: "Foliage",
+            params: BrushParams {
+                size: 30.0,
+                hardness: 0.7,
+                roundness: 0.45,
+                spacing: 0.35,
+                size_jitter: 0.7,
+                angle_jitter: 1.0,
+                opacity_jitter: 0.4,
+                scatter: 1.2,
+                pressure_size: false,
+                smoothing: 0.0,
+                ..d
+            },
+        },
+        Preset {
+            name: "Mouse ink",
+            params: BrushParams {
+                size: 9.0,
+                hardness: 0.95,
+                pressure_size: false,
+                speed_size: 0.8,
+                taper: 40.0,
+                smoothing: 0.6,
+                ..d
+            },
+        },
     ]
+}
+
+/// A brush the user saved.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UserBrush {
+    pub name: String,
+    pub params: BrushParams,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -238,6 +309,7 @@ pub struct TextDefaults {
     pub italic: bool,
     pub align_i: u8,
     pub line_height: f32,
+    pub pixel: bool,
 }
 
 impl Default for TextDefaults {
@@ -249,6 +321,7 @@ impl Default for TextDefaults {
             italic: false,
             align_i: 0,
             line_height: 1.2,
+            pixel: false,
         }
     }
 }
@@ -261,6 +334,7 @@ pub struct Prefs {
     pub select_antialias: bool,
     pub wand_tolerance: u8,
     pub wand_sample_all: bool,
+    pub color_tolerance: u8,
     pub brush: BrushParams,
     pub eraser: BrushParams,
     pub fg: [u8; 3],
@@ -288,6 +362,8 @@ pub struct Prefs {
     pub onion: bool,
     pub panel_colour: bool,
     pub panel_swatches: bool,
+    pub user_brushes: Vec<UserBrush>,
+    pub brush_editor: bool,
 }
 
 impl Default for Prefs {
@@ -298,6 +374,7 @@ impl Default for Prefs {
             select_antialias: true,
             wand_tolerance: 32,
             wand_sample_all: true,
+            color_tolerance: 24,
             brush: presets()[0].params,
             eraser: BrushParams {
                 size: 40.0,
@@ -331,6 +408,8 @@ impl Default for Prefs {
             onion: true,
             panel_colour: true,
             panel_swatches: true,
+            user_brushes: vec![],
+            brush_editor: false,
         }
     }
 }

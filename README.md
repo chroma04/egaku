@@ -22,21 +22,32 @@ On Linux you need the usual desktop libraries: Wayland or X11,
 ## What it does
 
 **Painting.** Pressure-sensitive brush and eraser with presets (pen, ink,
-pencil, marker, airbrush), a stabiliser, fill with gap closing, linear and
-radial gradients. True pen pressure and the pen's eraser end work on
+pencil, marker, airbrush, calligraphy, chalk, foliage, mouse ink), a
+stabiliser, fill with gap closing, linear and radial gradients. The brush
+editor (`F5`) shapes the tip (roundness, angle, turning with the stroke),
+its scatter and paper grain, entry taper and thinning with speed, with a
+scratch pad to try changes on the spot. The pressure curve can be fitted
+to your hand from a few test strokes, and your own brushes are kept in a
+library. True pen pressure and the pen's eraser end work on
 Windows (Ink), Wayland and macOS.
 
 **Layers.** Groups, clipping masks, twelve blend modes, opacity, alpha
 lock, merge, and drag-and-drop reordering into and out of groups.
+Ctrl- and Shift-click select several layers, and deleting, duplicating,
+grouping, merging, reordering, changing properties, moving and
+transforming then apply to all of them.
 
 **Objects.** Text and placed images are *objects*: move, scale and rotate
 them as often as you like and they never soften, because they're re-rendered
 from the original every time. Text keeps its words, font, size, bold and italic,
-alignment and line spacing. *Rasterize* turns either into plain pixels when
+alignment and line spacing, and can be set as aliased pixel text. *Rasterize* turns either into plain pixels when
 you want to paint on it.
 
-**Selections.** Rectangle, ellipse, lasso and magic wand, with add,
-subtract and intersect (Shift / Alt), feather, grow, shrink and invert.
+**Selections.** Rectangle, ellipse, lasso, magic wand and select-by-colour,
+with add, subtract and intersect (Shift / Alt), feather, grow, shrink and
+invert. Dragging inside a selection with a select tool moves its outline;
+the marching ants run clockwise around what is selected, so holes visibly
+crawl the other way.
 Painting, filling, filters and Delete all stay inside the selection. Copy,
 cut and paste work with other apps' clipboards too.
 
@@ -72,11 +83,12 @@ shows its shortcut. `F1` lists all of them. The ones worth learning first:
 
 | Input | Action |
 |---|---|
-| `V` `M` `L` `W` `C` | Move, select (again for ellipse), lasso, magic wand, crop |
+| `V` `M` `L` `W` `Shift+W` `C` | Move, select (again for ellipse), lasso, magic wand, select colour, crop |
 | `B` `E` `G` `Shift+G` `T` `I` | Brush, eraser, fill, gradient, text, eyedropper |
 | `Space` drag · wheel · `R` drag | Pan · zoom · rotate the view |
 | hold `Alt` · hold `Ctrl` | Eyedropper · move |
-| `[` `]` · `1`…`0` | Brush size · opacity |
+| `[` `]` · `1`…`0` · `F5` | Brush size · opacity · brush editor |
+| Arrows | Nudge the layer (move tool) or selection outline (select tool) |
 | `Ctrl+T` · `Enter` · `Esc` | Free transform · apply · cancel |
 | `Ctrl+A` `Ctrl+D` · `Shift`/`Alt` | Select all, deselect · add/subtract |
 | `Ctrl+G` · `Ctrl+Alt+G` · `Ctrl+J` | Group · clip to layer below · duplicate |

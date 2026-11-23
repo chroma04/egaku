@@ -19,6 +19,8 @@ pub const BG_PANEL: Color32 = Color32::from_rgb(30, 30, 33);
 pub const BG_RAISED: Color32 = Color32::from_rgb(40, 40, 44);
 pub const BG_HOVER: Color32 = Color32::from_rgb(50, 50, 55);
 pub const BG_ACTIVE: Color32 = Color32::from_rgb(60, 60, 66);
+/// Rows selected along with the active one.
+pub const BG_SELECTED: Color32 = Color32::from_rgb(48, 52, 64);
 pub const BG_CANVAS: Color32 = Color32::from_rgb(38, 38, 41);
 pub const LINE: Color32 = Color32::from_rgb(44, 44, 48);
 pub const TEXT: Color32 = Color32::from_rgb(228, 228, 232);

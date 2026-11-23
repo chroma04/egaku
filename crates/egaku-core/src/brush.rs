@@ -193,11 +193,12 @@ impl Mask {
     }
 }
 
-/// A single round brush imprint.
+/// A single brush imprint: a round or elliptical tip.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Dab {
     pub x: f32,
     pub y: f32,
+    /// Half the tip's long axis.
     pub radius: f32,
     /// 0 = soft airbrush falloff, 1 = crisp edge.
     pub hardness: f32,
@@ -207,6 +208,60 @@ pub struct Dab {
     pub cap: f32,
     /// Aliased square covering whole pixels (pixel-art mode).
     pub pixel: bool,
+    /// Short axis over long axis, 0..=1 (1 = round).
+    pub roundness: f32,
+    /// Rotation of the long axis, radians.
+    pub angle: f32,
+    /// How much the paper grain shows through, 0..=1.
+    pub grain: f32,
+    /// Size of the grain's features in canvas pixels.
+    pub grain_scale: f32,
+}
+
+impl Default for Dab {
+    fn default() -> Self {
+        Dab {
+            x: 0.0,
+            y: 0.0,
+            radius: 1.0,
+            hardness: 1.0,
+            flow: 1.0,
+            cap: 1.0,
+            pixel: false,
+            roundness: 1.0,
+            angle: 0.0,
+            grain: 0.0,
+            grain_scale: 6.0,
+        }
+    }
+}
+
+/// Smooth value noise in 0..=1, fixed to canvas coordinates so the grain
+/// stays put from stroke to stroke, like the tooth of real paper.
+#[inline]
+fn grain_at(x: f32, y: f32, scale: f32) -> f32 {
+    #[inline]
+    fn hash(x: i32, y: i32) -> f32 {
+        let mut h = (x as u32).wrapping_mul(0x8da6_b343) ^ (y as u32).wrapping_mul(0xd816_3841);
+        h ^= h >> 13;
+        h = h.wrapping_mul(0x85eb_ca6b);
+        h ^= h >> 16;
+        (h & 0xffff) as f32 / 65535.0
+    }
+    #[inline]
+    fn octave(x: f32, y: f32) -> f32 {
+        let (xi, yi) = (x.floor(), y.floor());
+        let (fx, fy) = (x - xi, y - yi);
+        let (sx, sy) = (fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy));
+        let (xi, yi) = (xi as i32, yi as i32);
+        let a = hash(xi, yi) + (hash(xi + 1, yi) - hash(xi, yi)) * sx;
+        let b = hash(xi, yi + 1) + (hash(xi + 1, yi + 1) - hash(xi, yi + 1)) * sx;
+        a + (b - a) * sy
+    }
+    let s = 1.0 / scale.max(0.5);
+    let n = octave(x * s, y * s) * 0.65 + octave(x * s * 2.7 + 17.0, y * s * 2.7 + 5.0) * 0.35;
+    // Stretch the middle so the texture has real peaks and valleys.
+    ((n - 0.5) * 1.8 + 0.5).clamp(0.0, 1.0)
 }
 
 struct DabShape {
@@ -217,12 +272,17 @@ struct DabShape {
     inv_soft: f32,
     flow: f32,
     cap: u32,
+    /// Elliptical tips: cos/sin of the angle and 1 / roundness.
+    ellipse: Option<(f32, f32, f32)>,
+    grain: f32,
+    grain_scale: f32,
 }
 
 impl DabShape {
     fn new(d: &Dab) -> Self {
         let r = d.radius.max(0.5);
         let inner = r * d.hardness.clamp(0.0, 1.0);
+        let round = d.roundness.clamp(0.02, 1.0);
         DabShape {
             x: d.x,
             y: d.y,
@@ -235,10 +295,17 @@ impl DabShape {
             },
             flow: d.flow.clamp(0.0, 1.0),
             cap: (d.cap.clamp(0.0, 1.0) * 65535.0 + 0.5) as u32,
+            ellipse: (round < 0.999).then(|| (d.angle.cos(), d.angle.sin(), 1.0 / round)),
+            grain: d.grain.clamp(0.0, 1.0),
+            grain_scale: d.grain_scale,
         }
     }
 
     fn stamp_tile(&self, c: TileCoord, px: [u32; 4], m: &mut MaskTile) {
+        if self.ellipse.is_some() || self.grain > 0.0 {
+            self.stamp_tile_general(c, px, m);
+            return;
+        }
         let t = TILE as u32;
         let (bx, by) = (c.x * t, c.y * t);
         let lx0 = px[0].saturating_sub(bx).min(t) as usize;
@@ -267,6 +334,51 @@ impl DabShape {
                 let edge = (self.r - d + 0.5).clamp(0.0, 1.0);
                 let s = (1.0 - (d - self.inner) * self.inv_soft).clamp(0.0, 1.0);
                 let f = edge.min(s * s * (3.0 - 2.0 * s)) * self.flow;
+                let cur = *v as f32;
+                *v = (cur + (cap - cur).max(0.0) * f + 0.5).min(cap.max(cur)) as u16;
+            }
+        }
+    }
+
+    /// Elliptical and/or textured tips.
+    fn stamp_tile_general(&self, c: TileCoord, px: [u32; 4], m: &mut MaskTile) {
+        let t = TILE as u32;
+        let (bx, by) = (c.x * t, c.y * t);
+        let lx0 = px[0].saturating_sub(bx).min(t) as usize;
+        let ly0 = px[1].saturating_sub(by).min(t) as usize;
+        let lx1 = (px[2].saturating_sub(bx)).min(t) as usize;
+        let ly1 = (px[3].saturating_sub(by)).min(t) as usize;
+        let (ca, sa, k) = self.ellipse.unwrap_or((1.0, 0.0, 1.0));
+        for ly in ly0..ly1 {
+            let py = (by as usize + ly) as f32 + 0.5;
+            let dy = py - self.y;
+            let row = &mut m.v[ly * TILE..ly * TILE + TILE];
+            for (lx, v) in row.iter_mut().enumerate().take(lx1).skip(lx0) {
+                let pxx = (bx as usize + lx) as f32 + 0.5;
+                let dx = pxx - self.x;
+                // Into the tip's frame, short axis stretched to a circle.
+                let u = dx * ca + dy * sa;
+                let w = (-dx * sa + dy * ca) * k;
+                let d = (u * u + w * w).sqrt();
+                // Distance to the edge in screen pixels, for antialiasing.
+                let g = if d > 1e-4 {
+                    ((u / d).powi(2) + (w * k / d).powi(2)).sqrt().max(1e-3)
+                } else {
+                    1.0
+                };
+                let edge = ((self.r - d) / g + 0.5).clamp(0.0, 1.0);
+                if edge <= 0.0 {
+                    continue;
+                }
+                let s = (1.0 - (d - self.inner) * self.inv_soft).clamp(0.0, 1.0);
+                let f = edge.min(s * s * (3.0 - 2.0 * s)) * self.flow;
+                let mut cap = self.cap as f32;
+                if self.grain > 0.0 {
+                    // The grain lowers how much paint a spot can ever hold, so
+                    // going over it again doesn't fill the valleys.
+                    let n = grain_at(pxx, py, self.grain_scale);
+                    cap *= 1.0 - self.grain * (1.0 - n);
+                }
                 let cur = *v as f32;
                 *v = (cur + (cap - cur).max(0.0) * f + 0.5).min(cap.max(cur)) as u16;
             }
@@ -379,6 +491,110 @@ pub struct BrushParams {
     pub pixel: bool,
     /// In pixel mode, removes the doubled corner pixels of 1px lines.
     pub pixel_perfect: bool,
+    /// Tip shape: short axis over long axis (1 = round).
+    pub roundness: f32,
+    /// Tip angle in degrees (relative to the stroke when following it).
+    pub angle: f32,
+    /// Turn the tip with the direction of the stroke (a calligraphy nib).
+    pub follow_direction: bool,
+    /// Random variation per dab, each 0..=1.
+    pub size_jitter: f32,
+    pub angle_jitter: f32,
+    pub opacity_jitter: f32,
+    /// Random offset of each dab, as a fraction of the diameter.
+    pub scatter: f32,
+    /// Paper texture showing through, 0..=1, and its feature size in px.
+    pub grain: f32,
+    pub grain_scale: f32,
+    /// Pen pressure response: four points `(input, output)` with rising
+    /// input, joined by a smooth monotone curve.
+    pub pressure_curve: [[f32; 2]; 4],
+    /// Pressure also scales flow (soft build-up).
+    pub pressure_flow: bool,
+    /// How much moving fast thins the line, 0..=1. Gives a mouse some of
+    /// the life of a pen.
+    pub speed_size: f32,
+    /// Length of the stroke's tapered start, in canvas pixels.
+    pub taper: f32,
+}
+
+/// A straight-line pressure curve.
+pub const LINEAR_CURVE: [[f32; 2]; 4] = [
+    [0.0, 0.0],
+    [1.0 / 3.0, 1.0 / 3.0],
+    [2.0 / 3.0, 2.0 / 3.0],
+    [1.0, 1.0],
+];
+
+/// Evaluates a pressure curve: flat outside its first and last points and a
+/// monotone cubic (Fritsch–Carlson) in between, so it never overshoots.
+pub fn eval_curve(pts: &[[f32; 2]; 4], x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    if x <= pts[0][0] {
+        return pts[0][1];
+    }
+    if x >= pts[3][0] {
+        return pts[3][1];
+    }
+    // Secant slopes, then tangents limited to keep monotone segments.
+    let mut d = [0f32; 3];
+    for i in 0..3 {
+        let dx = (pts[i + 1][0] - pts[i][0]).max(1e-5);
+        d[i] = (pts[i + 1][1] - pts[i][1]) / dx;
+    }
+    let mut m = [d[0], 0.0, 0.0, d[2]];
+    for i in 1..3 {
+        m[i] = if d[i - 1] * d[i] <= 0.0 {
+            0.0
+        } else {
+            (d[i - 1] + d[i]) * 0.5
+        };
+    }
+    for i in 0..3 {
+        if d[i].abs() < 1e-6 {
+            m[i] = 0.0;
+            m[i + 1] = 0.0;
+        } else {
+            let (a, b) = (m[i] / d[i], m[i + 1] / d[i]);
+            let h = a * a + b * b;
+            if h > 9.0 {
+                let t = 3.0 / h.sqrt();
+                m[i] = t * a * d[i];
+                m[i + 1] = t * b * d[i];
+            }
+        }
+    }
+    let i = (0..3).find(|&i| x <= pts[i + 1][0]).unwrap_or(2);
+    let (x0, x1) = (pts[i][0], pts[i + 1][0]);
+    let h = (x1 - x0).max(1e-5);
+    let t = (x - x0) / h;
+    let (t2, t3) = (t * t, t * t * t);
+    let y = (2.0 * t3 - 3.0 * t2 + 1.0) * pts[i][1]
+        + (t3 - 2.0 * t2 + t) * h * m[i]
+        + (-2.0 * t3 + 3.0 * t2) * pts[i + 1][1]
+        + (t3 - t2) * h * m[i + 1];
+    y.clamp(0.0, 1.0)
+}
+
+/// A pressure curve fitted to how someone actually presses: the light end
+/// of their range maps to 0, the heavy end to 1 and their typical pressure
+/// to the middle. `samples` are raw pressures from a test stroke.
+pub fn fit_curve(samples: &[f32]) -> Option<[[f32; 2]; 4]> {
+    let mut v: Vec<f32> = samples
+        .iter()
+        .copied()
+        .filter(|p| p.is_finite() && *p > 0.0)
+        .collect();
+    if v.len() < 8 {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let at = |q: f32| v[((v.len() - 1) as f32 * q).round() as usize];
+    let lo = (at(0.05) * 0.8).clamp(0.0, 0.6);
+    let hi = at(0.95).clamp(lo + 0.15, 1.0);
+    let mid = at(0.5).clamp(lo + 0.05, hi - 0.05);
+    let q3 = (mid + hi) * 0.5;
+    Some([[lo, 0.0], [mid, 0.5], [q3, 0.78], [hi, 1.0]])
 }
 
 impl Default for BrushParams {
@@ -395,6 +611,19 @@ impl Default for BrushParams {
             smoothing: 0.3,
             pixel: false,
             pixel_perfect: true,
+            roundness: 1.0,
+            angle: 0.0,
+            follow_direction: false,
+            size_jitter: 0.0,
+            angle_jitter: 0.0,
+            opacity_jitter: 0.0,
+            scatter: 0.0,
+            grain: 0.0,
+            grain_scale: 6.0,
+            pressure_curve: LINEAR_CURVE,
+            pressure_flow: false,
+            speed_size: 0.0,
+            taper: 0.0,
         }
     }
 }
@@ -404,6 +633,8 @@ struct Pt {
     x: f32,
     y: f32,
     p: f32,
+    /// Size factor from speed, 0..=1.
+    v: f32,
 }
 
 /// Turns a stream of pointer samples into evenly spaced dabs.
@@ -412,6 +643,11 @@ pub struct StrokeEngine {
     smoothed: Option<Pt>,
     last_raw: Option<Pt>,
     carry: f32,
+    /// Distance travelled along the (smoothed) stroke.
+    travelled: f32,
+    /// Smoothed pointer speed, in diameters per sample.
+    speed: f32,
+    rng: u32,
     /// Pixel mode: last emitted pixel and pixels held back for the
     /// pixel-perfect corner test.
     last_px: Option<(i64, i64)>,
@@ -425,6 +661,9 @@ impl StrokeEngine {
             smoothed: None,
             last_raw: None,
             carry: 0.0,
+            travelled: 0.0,
+            speed: 0.0,
+            rng: 0x9e37_79b9,
             last_px: None,
             held: vec![],
         }
@@ -434,27 +673,85 @@ impl StrokeEngine {
         &self.params
     }
 
-    fn dab_at(&self, q: Pt) -> Dab {
+    /// A random number in -1..=1.
+    fn rand(&mut self) -> f32 {
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng = x;
+        (x >> 8) as f32 / (1u32 << 23) as f32 - 1.0
+    }
+
+    /// The size multiplier from pressure, speed and the entry taper, before
+    /// any randomness (also used for spacing).
+    fn size_scale(&self, q: Pt, dist: f32) -> f32 {
         let p = &self.params;
-        let pr = q.p.clamp(0.0, 1.0);
-        let scale = if p.pressure_size {
+        let pr = eval_curve(&p.pressure_curve, q.p);
+        let mut scale = if p.pressure_size {
             p.min_size + (1.0 - p.min_size) * pr
         } else {
             1.0
         };
-        let cap = if p.pressure_opacity {
+        scale *= q.v;
+        if p.taper > 0.5 && !p.pixel {
+            let t = (dist / p.taper).clamp(0.0, 1.0);
+            scale *= 0.08 + 0.92 * t * (2.0 - t);
+        }
+        scale
+    }
+
+    fn dab_at(&mut self, q: Pt, dist: f32, heading: f32) -> Dab {
+        let p = self.params;
+        let pr = eval_curve(&p.pressure_curve, q.p);
+        let mut scale = self.size_scale(q, dist);
+        let mut cap = if p.pressure_opacity {
             p.opacity * pr
         } else {
             p.opacity
         };
+        let mut flow = if p.pixel {
+            1.0
+        } else if p.pressure_flow {
+            p.flow * (0.1 + 0.9 * pr)
+        } else {
+            p.flow
+        };
+        let (mut x, mut y) = (q.x, q.y);
+        let mut angle = p.angle.to_radians();
+        if p.follow_direction {
+            angle += heading;
+        }
+        if !p.pixel {
+            if p.size_jitter > 0.0 {
+                scale *= 1.0 - p.size_jitter * 0.5 * (self.rand() + 1.0) * 0.9;
+            }
+            if p.angle_jitter > 0.0 {
+                angle += self.rand() * p.angle_jitter * std::f32::consts::PI;
+            }
+            if p.opacity_jitter > 0.0 {
+                let j = 1.0 - p.opacity_jitter * 0.5 * (self.rand() + 1.0);
+                cap *= j;
+                flow *= j;
+            }
+            if p.scatter > 0.0 {
+                let r = p.size * scale * p.scatter;
+                x += self.rand() * r;
+                y += self.rand() * r;
+            }
+        }
         Dab {
-            x: q.x,
-            y: q.y,
+            x,
+            y,
             radius: (p.size * 0.5 * scale).max(0.5),
             hardness: p.hardness,
-            flow: if p.pixel { 1.0 } else { p.flow },
+            flow,
             cap,
             pixel: p.pixel,
+            roundness: if p.pixel { 1.0 } else { p.roundness },
+            angle,
+            grain: if p.pixel { 0.0 } else { p.grain },
+            grain_scale: p.grain_scale,
         }
     }
 
@@ -492,11 +789,12 @@ impl StrokeEngine {
         }
     }
 
-    fn spacing_at(&self, q: Pt) -> f32 {
+    fn spacing_at(&self, q: Pt, dist: f32) -> f32 {
         if self.params.pixel {
             return 0.5;
         }
-        (self.dab_at(q).radius * 2.0 * self.params.spacing.max(0.01)).max(0.5)
+        let d = self.params.size * self.size_scale(q, dist).max(0.0);
+        (d * self.params.spacing.max(0.01)).max(0.5)
     }
 
     fn segment(&mut self, a: Pt, b: Pt, out: &mut Vec<Dab>) {
@@ -505,28 +803,48 @@ impl StrokeEngine {
         if len <= 1e-6 {
             return;
         }
+        let heading = dy.atan2(dx);
         let mut t = 0.0f32; // distance travelled along this segment
+        let start = self.travelled;
         loop {
             let here = lerp_pt(a, b, t / len);
-            let need = self.spacing_at(here) - self.carry;
+            let need = self.spacing_at(here, start + t) - self.carry;
             if t + need > len {
                 self.carry += len - t;
+                self.travelled = start + len;
                 return;
             }
             t += need;
             self.carry = 0.0;
-            let d = self.dab_at(lerp_pt(a, b, t / len));
+            let d = self.dab_at(lerp_pt(a, b, t / len), start + t, heading);
             self.emit(d, out);
         }
     }
 
     /// Adds a pointer sample (canvas coordinates, pressure 0..=1).
     pub fn add_point(&mut self, x: f32, y: f32, pressure: f32, out: &mut Vec<Dab>) {
-        let raw = Pt { x, y, p: pressure };
+        let mut raw = Pt {
+            x,
+            y,
+            p: pressure,
+            v: 1.0,
+        };
+        if let Some(last) = self.last_raw {
+            let d = ((x - last.x).powi(2) + (y - last.y).powi(2)).sqrt();
+            let v = d / self.params.size.max(1.0);
+            self.speed = self.speed * 0.75 + v * 0.25;
+        }
+        let k = self.params.speed_size.clamp(0.0, 1.0);
+        if k > 0.0 {
+            raw.v = 1.0 - k * 0.85 * (1.0 - (-self.speed * 1.5).exp());
+        }
         self.last_raw = Some(raw);
         let Some(prev) = self.smoothed else {
+            // Seed the jitter from where the stroke starts, so every stroke
+            // differs but a replay is identical.
+            self.rng = (x.to_bits() ^ y.to_bits().rotate_left(16)) | 1;
             self.smoothed = Some(raw);
-            let d = self.dab_at(raw);
+            let d = self.dab_at(raw, 0.0, 0.0);
             self.emit(d, out);
             return;
         };
@@ -538,6 +856,7 @@ impl StrokeEngine {
             x: prev.x + (raw.x - prev.x) * w,
             y: prev.y + (raw.y - prev.y) * w,
             p: prev.p + (raw.p - prev.p) * w.max(0.5),
+            v: prev.v + (raw.v - prev.v) * w.max(0.5),
         };
         self.segment(prev, next, out);
         self.smoothed = Some(next);
@@ -546,7 +865,15 @@ impl StrokeEngine {
     /// Ends the stroke, letting the stabilised path catch up to the pen.
     pub fn finish(&mut self, out: &mut Vec<Dab>) {
         if let (Some(s), Some(r)) = (self.smoothed, self.last_raw) {
-            self.segment(s, Pt { p: s.p, ..r }, out);
+            self.segment(
+                s,
+                Pt {
+                    p: s.p,
+                    v: s.v,
+                    ..r
+                },
+                out,
+            );
             self.smoothed = Some(r);
         }
         out.append(&mut self.held);
@@ -563,6 +890,7 @@ fn lerp_pt(a: Pt, b: Pt, t: f32) -> Pt {
         x: a.x + (b.x - a.x) * t,
         y: a.y + (b.y - a.y) * t,
         p: a.p + (b.p - a.p) * t,
+        v: a.v + (b.v - a.v) * t,
     }
 }
 
@@ -604,6 +932,7 @@ mod tests {
             flow: 0.5,
             cap: 0.5,
             pixel: false,
+            ..Default::default()
         };
         for _ in 0..50 {
             m.stamp(&dab, &mut dirty);
@@ -625,6 +954,7 @@ mod tests {
             flow: 0.02,
             cap: 1.0,
             pixel: false,
+            ..Default::default()
         };
         for _ in 0..800 {
             m.stamp(&dab, &mut dirty);
@@ -711,6 +1041,7 @@ mod tests {
                 flow: 1.0,
                 cap: 1.0,
                 pixel: false,
+                ..Default::default()
             },
             &mut dirty,
         );
@@ -720,5 +1051,114 @@ mod tests {
         let a = m.value(500 + 200, 500);
         let b = m.value(500 - 201, 500);
         assert!((a as i32 - b as i32).abs() < 200, "{a} {b}");
+    }
+
+    #[test]
+    fn pressure_curve_is_monotone_and_linear_by_default() {
+        for i in 0..=20 {
+            let x = i as f32 / 20.0;
+            assert!((eval_curve(&LINEAR_CURVE, x) - x).abs() < 1e-4);
+        }
+        let c = [[0.1, 0.0], [0.3, 0.6], [0.5, 0.65], [0.8, 1.0]];
+        let mut last = -1.0;
+        for i in 0..=100 {
+            let y = eval_curve(&c, i as f32 / 100.0);
+            assert!(y >= last - 1e-6, "not monotone at {i}");
+            last = y;
+        }
+        assert_eq!(eval_curve(&c, 0.05), 0.0);
+        assert_eq!(eval_curve(&c, 0.9), 1.0);
+        // A light-handed artist: pressures mostly around 0.2–0.4.
+        let samples: Vec<f32> = (0..100).map(|i| 0.2 + 0.2 * (i as f32 / 99.0)).collect();
+        let f = fit_curve(&samples).unwrap();
+        assert!(eval_curve(&f, 0.3) > 0.4 && eval_curve(&f, 0.3) < 0.6);
+        assert!(eval_curve(&f, 0.4) > 0.95);
+    }
+
+    #[test]
+    fn elliptical_tip_and_grain() {
+        let mut m = Mask::new(128, 128);
+        let mut dirty = vec![];
+        let dab = Dab {
+            x: 64.0,
+            y: 64.0,
+            radius: 30.0,
+            roundness: 0.25,
+            angle: 0.0,
+            ..Default::default()
+        };
+        m.stamp(&dab, &mut dirty);
+        // Long along x, short along y.
+        assert_eq!(m.value(90, 64), 65535);
+        assert_eq!(m.value(64, 76), 0);
+        assert_eq!(m.value(64, 68), 65535);
+        // Rotated a quarter turn, it stands upright.
+        let mut m = Mask::new(128, 128);
+        m.stamp(
+            &Dab {
+                angle: std::f32::consts::FRAC_PI_2,
+                ..dab
+            },
+            &mut dirty,
+        );
+        assert_eq!(m.value(64, 90), 65535);
+        assert_eq!(m.value(76, 64), 0);
+        // Grain: repeated dabs still leave texture behind.
+        let mut m = Mask::new(128, 128);
+        let g = Dab {
+            roundness: 1.0,
+            grain: 1.0,
+            grain_scale: 4.0,
+            ..dab
+        };
+        for _ in 0..30 {
+            m.stamp(&g, &mut dirty);
+        }
+        let vals: Vec<u16> = (50..78).map(|x| m.value(x, 64)).collect();
+        let (lo, hi) = (*vals.iter().min().unwrap(), *vals.iter().max().unwrap());
+        assert!(hi - lo > 20000, "{lo} {hi}");
+    }
+
+    #[test]
+    fn taper_and_speed_thin_the_stroke() {
+        let base = BrushParams {
+            size: 20.0,
+            pressure_size: false,
+            smoothing: 0.0,
+            spacing: 0.1,
+            ..Default::default()
+        };
+        let run = |p: BrushParams| {
+            let mut e = StrokeEngine::new(p);
+            let mut dabs = vec![];
+            for i in 0..=40 {
+                e.add_point(i as f32 * 5.0, 0.0, 1.0, &mut dabs);
+            }
+            e.finish(&mut dabs);
+            dabs
+        };
+        let plain = run(base);
+        assert!(plain.iter().all(|d| (d.radius - 10.0).abs() < 1e-3));
+        let tapered = run(BrushParams {
+            taper: 60.0,
+            ..base
+        });
+        assert!(tapered[0].radius < 2.0);
+        assert!((tapered.last().unwrap().radius - 10.0).abs() < 1e-3);
+        let fast = run(BrushParams {
+            speed_size: 1.0,
+            ..base
+        });
+        assert!(fast.last().unwrap().radius < 8.0);
+        // Following the stroke turns the tip with it.
+        let mut e = StrokeEngine::new(BrushParams {
+            follow_direction: true,
+            roundness: 0.3,
+            ..base
+        });
+        let mut dabs = vec![];
+        e.add_point(0.0, 0.0, 1.0, &mut dabs);
+        e.add_point(0.0, 50.0, 1.0, &mut dabs);
+        assert!((dabs.last().unwrap().angle - std::f32::consts::FRAC_PI_2).abs() < 1e-3);
     }
 }
