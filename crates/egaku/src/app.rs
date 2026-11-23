@@ -444,7 +444,9 @@ impl App {
         if self.free_transform {
             return;
         }
-        self.text_edit = None;
+        if self.text_edit.take().is_some() {
+            self.ed.end_gesture();
+        }
         match self.ed.begin_transform(self.prefs.smooth_transform) {
             Ok(()) => {
                 self.free_transform = true;

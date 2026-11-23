@@ -1542,7 +1542,7 @@ impl Editor {
         self.commit("New layer", |doc| {
             let l = doc.new_layer(doc.next_layer_name());
             let id = l.id;
-            doc.put(l, place);
+            put_joining_clip(doc, l, place);
             doc.state.active = id;
         });
     }
@@ -1552,7 +1552,7 @@ impl Editor {
         self.commit("New group", |doc| {
             let g = doc.new_group(doc.next_name("Group"));
             let id = g.id;
-            doc.put(g, place);
+            put_joining_clip(doc, g, place);
             doc.state.active = id;
         });
     }
@@ -1563,7 +1563,7 @@ impl Editor {
         self.commit(label, |doc| {
             doc.reassign_ids(&mut layer);
             let id = layer.id;
-            doc.put(layer, place);
+            put_joining_clip(doc, layer, place);
             doc.state.active = id;
         });
     }
@@ -1642,7 +1642,8 @@ impl Editor {
                     doc.reassign_ids(&mut l);
                     l.name = format!("{} copy", l.name);
                     let nid = l.id;
-                    doc.put(
+                    put_joining_clip(
+                        doc,
                         l,
                         Place {
                             parent: place.parent,
@@ -2435,6 +2436,17 @@ impl Editor {
     }
 }
 
+/// Inserts a layer, clipping it too when it lands inside a clipping stack
+/// (under a clipped layer), so the layers above keep clipping to the same
+/// base instead of to the newcomer.
+fn put_joining_clip(doc: &mut Document, mut l: Layer, place: Place) {
+    let sib = doc.siblings(place.parent);
+    if place.index > 0 && sib.get(place.index).is_some_and(|above| above.clip) {
+        l.clip = true;
+    }
+    doc.put(l, place);
+}
+
 /// An exact rotation by quarter turns (no floating-point drift).
 fn exact_rot(q: i32) -> Affine {
     match q.rem_euclid(4) {
@@ -3039,5 +3051,23 @@ mod tests {
         assert_eq!(s.value(60, 60), 0);
         ed.select_color(15, 100, 10, false, true, SelectOp::Add);
         assert_eq!(ed.selection().unwrap().value(15, 100), 255);
+    }
+
+    #[test]
+    fn new_layer_inside_clip_stack_joins_it() {
+        let mut ed = Editor::new(Document::new(64, 64, None));
+        let base = ed.doc.active_id();
+        ed.add_layer();
+        let top = ed.doc.active_id();
+        ed.toggle_clip(top);
+        ed.select_layer(base);
+        ed.add_layer();
+        let mid = ed.doc.active_id();
+        assert!(ed.doc.find(mid).unwrap().clip);
+        assert_eq!(ed.doc.layers()[0].id, base);
+        // Above the whole stack, a new layer stays unclipped.
+        ed.select_layer(top);
+        ed.add_layer();
+        assert!(!ed.doc.active_layer().clip);
     }
 }

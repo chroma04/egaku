@@ -454,6 +454,14 @@ pub fn field(
     let id = ui.scope_id().with(("field", label));
     let (rect, mut resp) = ui.allocate_exact_size(vec2(width, theme::ROW), Sense::click_and_drag());
     if resp.double_clicked() {
+        // The first click of the double-click moved the value; put it back,
+        // since the double-click means "let me type it".
+        if let Some(v) = ui.data(|d| d.get_temp::<f32>(id.with("before-click")))
+            && v != *value
+        {
+            *value = v;
+            resp.mark_changed();
+        }
         begin_cell(ui, id, fmt.edit_text(*value));
     }
     let to_t = |v: f32| match scale {
@@ -473,18 +481,7 @@ pub fn field(
         }
         return resp;
     }
-    // The first click of a double-click moved the value; put it back, since
-    // the double-click means "let me type it".
     let undo_id = id.with("before-click");
-    if resp.double_clicked() {
-        if let Some(v) = ui.data(|d| d.get_temp::<f32>(undo_id))
-            && v != *value
-        {
-            *value = v;
-            resp.mark_changed();
-        }
-        return resp;
-    }
     if resp.clicked() {
         ui.data_mut(|d| d.insert_temp(undo_id, *value));
     } else if resp.drag_started() {

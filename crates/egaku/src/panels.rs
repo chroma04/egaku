@@ -1630,6 +1630,7 @@ impl App {
             let on_control = eye_r.hovered() || caret_r.as_ref().is_some_and(|c| c.hovered());
             if resp.double_clicked() && !on_control {
                 if kind == Kind::Text {
+                    self.finish_modes();
                     self.ed.select_layer(id);
                     self.set_tool(Tool::Text);
                     if let Content::Text(o) = &self.ed.doc.active_layer().content {
@@ -1786,15 +1787,18 @@ impl App {
             ui.add_enabled_ui(frames > 1, |ui| {
                 if icon_button(ui, ph::TRASH, theme::ROW, false, "Delete frame").clicked() {
                     self.playing = None;
+                    self.finish_modes();
                     self.ed.delete_frame();
                 }
                 if icon_button(ui, ph::CARET_LEFT, theme::ROW, false, "Move frame earlier")
                     .clicked()
                 {
+                    self.finish_modes();
                     self.ed.move_frame(-1);
                 }
                 if icon_button(ui, ph::CARET_RIGHT, theme::ROW, false, "Move frame later").clicked()
                 {
+                    self.finish_modes();
                     self.ed.move_frame(1);
                 }
             });
