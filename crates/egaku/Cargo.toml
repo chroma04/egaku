@@ -12,7 +12,10 @@ rayon.workspace = true
 eframe = { version = "0.37", default-features = false, features = ["wgpu", "wayland", "x11", "default_fonts", "persistence", "accesskit"] }
 serde = { version = "1", features = ["derive"] }
 rfd = "0.18"
+egui-pop-phosphor = "0.15"
+octotablet = { version = "0.1", optional = true }
 
 [features]
-# Lets `EFRAME_SCREENSHOT_TO=path.png` capture a frame (used for docs/tests).
-screenshot = ["eframe/__screenshot"]
+default = ["tablet"]
+# Pen pressure, tilt and eraser via the platform tablet API (Wayland, Windows Ink).
+tablet = ["dep:octotablet"]

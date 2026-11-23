@@ -91,28 +91,6 @@ pub fn picker(ui: &mut egui::Ui, hsv: &mut Hsv, width: f32) -> bool {
     changed
 }
 
-/// A colour swatch; returns its response.
-pub fn swatch(
-    ui: &mut egui::Ui,
-    color: [u8; 3],
-    size: egui::Vec2,
-    selected: bool,
-) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let c = Color32::from_rgb(color[0], color[1], color[2]);
-    ui.painter().rect_filled(rect, 3.0, c);
-    let stroke = if selected {
-        Stroke::new(2.0, Color32::WHITE)
-    } else if resp.hovered() {
-        Stroke::new(1.0, Color32::from_gray(200))
-    } else {
-        Stroke::new(1.0, Color32::from_gray(20))
-    };
-    ui.painter()
-        .rect_stroke(rect, 3.0, stroke, egui::StrokeKind::Inside);
-    resp
-}
-
 pub fn to_hsv(c: [u8; 3]) -> Hsv {
     Rgb::from_u8(c).to_hsv()
 }

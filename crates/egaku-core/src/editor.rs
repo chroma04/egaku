@@ -1010,6 +1010,9 @@ impl Editor {
         let (cols, rows) = self.doc.grid_dims();
         let t = TILE as i64;
         let m = f.margin() as i64;
+        if f.full_canvas() {
+            return TileRect { x0: 0, y0: 0, x1: cols, y1: rows };
+        }
         match l.tiles.bounds() {
             None => TileRect {
                 x0: 0,

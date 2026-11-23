@@ -17,6 +17,64 @@ pub trait Filter: Send + Sync {
     }
     /// New contents of tile `c`, or `None` if it ends up empty.
     fn apply(&self, src: &TileGrid, c: TileCoord) -> Option<Tile>;
+    /// Whether the filter can paint anywhere, not just near existing pixels.
+    fn full_canvas(&self) -> bool {
+        false
+    }
+}
+
+/// A linear or radial gradient drawn over the layer.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Gradient {
+    pub radial: bool,
+    pub from: (f32, f32),
+    pub to: (f32, f32),
+    /// Straight-alpha colours at the start and end.
+    pub c0: [u8; 4],
+    pub c1: [u8; 4],
+    pub opacity: f32,
+}
+
+impl Filter for Gradient {
+    fn full_canvas(&self) -> bool {
+        true
+    }
+
+    fn apply(&self, src: &TileGrid, c: TileCoord) -> Option<Tile> {
+        let (dx, dy) = (self.to.0 - self.from.0, self.to.1 - self.from.1);
+        let len2 = (dx * dx + dy * dy).max(1e-6);
+        let len = len2.sqrt();
+        let p0 = premultiply(self.c0).map(|v| v as f32);
+        let p1 = premultiply(self.c1).map(|v| v as f32);
+        let op = self.opacity.clamp(0.0, 1.0);
+        let mut g = Tile::filled([0; 4]);
+        let (ox, oy) = (c.x as f32 * TILE as f32, c.y as f32 * TILE as f32);
+        for y in 0..TILE {
+            for x in 0..TILE {
+                let (px, py) = (ox + x as f32 + 0.5 - self.from.0, oy + y as f32 + 0.5 - self.from.1);
+                let t = if self.radial {
+                    (px * px + py * py).sqrt() / len
+                } else {
+                    (px * dx + py * dy) / len2
+                }
+                .clamp(0.0, 1.0);
+                // A 4×4 ordered dither hides banding in long, subtle ramps.
+                const B: [f32; 16] = [0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0];
+                let d = B[(y % 4) * 4 + x % 4] / 16.0 - 0.47;
+                let mut q = [0u8; 4];
+                for ch in 0..4 {
+                    q[ch] = ((p0[ch] + (p1[ch] - p0[ch]) * t) * op + d).clamp(0.0, 255.0) as u8;
+                }
+                for ch in 0..3 {
+                    q[ch] = q[ch].min(q[3]);
+                }
+                g.px[y * TILE + x] = q;
+            }
+        }
+        let mut out = src.get(c).map_or_else(|| Tile::filled([0; 4]), |t| (**t).clone());
+        crate::blend::blend_tile(&mut out, &g, 255, crate::blend::BlendMode::Normal);
+        if out.is_empty() { None } else { Some(out) }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
