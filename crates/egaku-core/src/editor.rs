@@ -31,29 +31,43 @@ struct ActiveStroke {
     sel: Option<Arc<Selection>>,
 }
 
-/// A free transform (or move) in progress.
-pub struct Transforming {
-    pub layer: LayerId,
-    pub kind: Kind,
+/// One layer taking part in a transform.
+struct Part {
+    layer: LayerId,
+    kind: Kind,
     /// What is being transformed, and how it maps to the canvas at the start.
     src: Arc<Source>,
     src_m: Affine,
+    /// Raster layers: what stays behind when a selection is floated.
+    base: Option<Arc<TileGrid>>,
+    sel: Option<Arc<Selection>>,
+}
+
+impl Part {
+    fn dest_rect(&self, delta: &Affine, cols: u32, rows: u32) -> TileRect {
+        let r = self.src.dest_tiles(&delta.compose(self.src_m), cols, rows);
+        match &self.base {
+            Some(b) => b.bounds().map_or(r, |br| r.union(br)),
+            None => r,
+        }
+    }
+}
+
+/// A free transform (or move) in progress, of one or several layers.
+pub struct Transforming {
+    /// The active layer (the first part).
+    pub layer: LayerId,
+    pub kind: Kind,
+    parts: Vec<Part>,
     /// The handle frame: box-space → canvas at the start, and the box size.
     pub frame: Affine,
     pub size: (f32, f32),
     /// The user's transform, applied on top (canvas → canvas).
     pub delta: Affine,
     pub smooth: bool,
-    /// Raster layers: what stays behind when a selection is floated.
-    base: Option<Arc<TileGrid>>,
-    sel: Option<Arc<Selection>>,
 }
 
 impl Transforming {
-    fn matrix(&self) -> Affine {
-        self.delta.compose(self.src_m)
-    }
-
     /// Corners of the handle frame in canvas coordinates, clockwise from the
     /// top-left.
     pub fn quad(&self) -> [(f32, f32); 4] {
@@ -67,12 +81,50 @@ impl Transforming {
         ]
     }
 
+    /// The selection being carried along with the pixels, if any.
+    pub fn selection(&self) -> Option<&Selection> {
+        self.parts.iter().find_map(|p| p.sel.as_deref())
+    }
+
+    /// Whether every part is plain pixels (moves snap to whole pixels).
+    pub fn is_raster(&self) -> bool {
+        self.parts.iter().all(|p| p.kind == Kind::Raster)
+    }
+
+    pub fn layers(&self) -> impl Iterator<Item = LayerId> + '_ {
+        self.parts.iter().map(|p| p.layer)
+    }
+
     fn dest_rect(&self, cols: u32, rows: u32) -> TileRect {
-        let r = self.src.dest_tiles(&self.matrix(), cols, rows);
-        match &self.base {
-            Some(b) => b.bounds().map_or(r, |br| r.union(br)),
-            None => r,
+        let mut r: Option<TileRect> = None;
+        for p in &self.parts {
+            let d = p.dest_rect(&self.delta, cols, rows);
+            if !d.is_empty() {
+                r = Some(r.map_or(d, |r| r.union(d)));
+            }
         }
+        r.unwrap_or(TileRect {
+            x0: 0,
+            y0: 0,
+            x1: 0,
+            y1: 0,
+        })
+    }
+
+    fn start_rect(&self, cols: u32, rows: u32) -> TileRect {
+        let mut r: Option<TileRect> = None;
+        for p in &self.parts {
+            let d = p.src.dest_tiles(&p.src_m, cols, rows);
+            if !d.is_empty() {
+                r = Some(r.map_or(d, |r| r.union(d)));
+            }
+        }
+        r.unwrap_or(TileRect {
+            x0: 0,
+            y0: 0,
+            x1: 0,
+            y1: 0,
+        })
     }
 }
 
@@ -102,12 +154,23 @@ impl Default for Onion {
     }
 }
 
+/// Where dragged layers land, relative to another layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropAt {
+    Above(LayerId),
+    Below(LayerId),
+    /// On top of a group's contents.
+    Into(LayerId),
+}
+
 /// Why an edit could not start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     LayerHidden,
     LayerEmpty,
     Busy,
+    /// None of the layers involved have pixels the edit could change.
+    NoPixels,
     /// The active layer is a group, text or image; painting needs pixels.
     NotPaintable(Kind),
 }
@@ -135,6 +198,8 @@ pub struct Editor {
     transform: Option<Transforming>,
     filter: Option<Filtering>,
     coalesce: Option<String>,
+    /// Layers selected along with the active one (not undoable).
+    extra: Vec<LayerId>,
     last_point: Option<(f32, f32)>,
     dabs: Vec<Dab>,
     dirty: Vec<TileCoord>,
@@ -142,20 +207,17 @@ pub struct Editor {
 
 /// The override the editor hands to the compositor.
 struct EdOv<'a> {
+    ids: Vec<LayerId>,
     stroke: Option<&'a ActiveStroke>,
-    transform: Option<(&'a Transforming, Affine, Affine)>,
+    transform: Option<&'a Transforming>,
     filter: Option<&'a Filtering>,
     alpha_lock: bool,
     onion: Vec<(LayerId, Arc<TileGrid>, [u8; 3], u8)>,
 }
 
 impl Ov for EdOv<'_> {
-    fn layer(&self) -> Option<LayerId> {
-        self.stroke
-            .map(|s| s.layer)
-            .or(self.transform.map(|t| t.0.layer))
-            .or(self.filter.map(|f| f.layer))
-            .or(self.onion.first().map(|o| o.0))
+    fn layers(&self) -> &[LayerId] {
+        &self.ids
     }
 
     fn tile(&self, l: &Layer, c: TileCoord) -> Option<Option<Tile>> {
@@ -178,19 +240,21 @@ impl Ov for EdOv<'_> {
             apply_mask_tile_sel(&mut t, m, sel_t, &s.paint);
             return Some(Some(t));
         }
-        if let Some((t, m, inv)) = &self.transform
-            && t.layer == l.id
+        if let Some(tr) = self.transform
+            && let Some(p) = tr.parts.iter().find(|p| p.layer == l.id)
         {
-            let mut out = t
+            let m = tr.delta.compose(p.src_m);
+            let inv = m.inverse()?;
+            let mut out = p
                 .base
                 .as_ref()
                 .and_then(|b| b.get(c))
                 .map(|x| (**x).clone());
-            let r = if !t.smooth && m.is_translation() && t.src_m == Affine::IDENTITY {
+            let r = if !tr.smooth && m.is_translation() && p.src_m == Affine::IDENTITY {
                 let (dx, dy) = (m.m[4].round() as i64, m.m[5].round() as i64);
-                t.src.base.shifted_tile(c, dx, dy)
+                p.src.base.shifted_tile(c, dx, dy)
             } else {
-                t.src.render_tile(m, inv, t.smooth, c)
+                p.src.render_tile(&m, &inv, tr.smooth, c)
             };
             if let Some(r) = r {
                 match &mut out {
@@ -306,6 +370,7 @@ impl Editor {
             transform: None,
             filter: None,
             coalesce: None,
+            extra: vec![],
             last_point: None,
             dabs: vec![],
             dirty: vec![],
@@ -367,19 +432,27 @@ impl Editor {
     /// Recomposites the display. `visible` is in level-0 tile coordinates.
     /// Returns true if more work is pending.
     pub fn update_projection(&mut self, visible: Option<TileRect>, budget: usize) -> bool {
+        let onion = self.onion_cels();
+        let ids: Vec<LayerId> = if let Some(s) = &self.stroke {
+            vec![s.layer]
+        } else if let Some(t) = &self.transform {
+            t.layers().collect()
+        } else if let Some(f) = &self.filter {
+            vec![f.layer]
+        } else {
+            onion.first().map(|o| o.0).into_iter().collect()
+        };
         let ov = EdOv {
+            ids,
             stroke: self.stroke.as_ref(),
-            transform: self.transform.as_ref().and_then(|t| {
-                let m = t.matrix();
-                m.inverse().map(|inv| (t, m, inv))
-            }),
+            transform: self.transform.as_ref(),
             filter: self.filter.as_ref(),
             alpha_lock: self
                 .filter
                 .as_ref()
                 .and_then(|f| self.doc.find(f.layer))
                 .is_some_and(|l| l.alpha_lock),
-            onion: self.onion_cels(),
+            onion,
         };
         self.projection.update(&self.doc, &ov, visible, budget)
     }
@@ -394,6 +467,11 @@ impl Editor {
         let before = self.doc.state.clone();
         f(&mut self.doc);
         self.fix_active();
+        if self.doc.state.active != before.active {
+            // A new active layer (added, merged…) starts a new selection;
+            // callers that want more selected set it afterwards.
+            self.extra.clear();
+        }
         let cost = snapshot_cost(&before, &self.doc.state);
         self.invalidate_between(&before);
         self.history.push(before, label, self.state_id, cost);
@@ -463,34 +541,37 @@ impl Editor {
     }
 
     pub fn undo(&mut self) -> bool {
-        self.cancel_all();
-        let cur = std::mem::replace(&mut self.doc.state, empty_state());
-        match self.history.undo(cur, self.state_id) {
-            Ok(s) => self.restore(s.state, s.state_id),
-            Err(cur) => {
-                self.doc.state = cur;
-                false
-            }
-        }
+        self.step_history(true)
     }
 
     pub fn redo(&mut self) -> bool {
+        self.step_history(false)
+    }
+
+    fn step_history(&mut self, back: bool) -> bool {
         self.cancel_all();
+        // States share their layers, so this copy is cheap; it lets the
+        // display invalidate only what actually differs (and keeps a
+        // same-size undo from looking like a canvas resize).
+        let before = self.doc.state.clone();
         let cur = std::mem::replace(&mut self.doc.state, empty_state());
-        match self.history.redo(cur, self.state_id) {
-            Ok(s) => self.restore(s.state, s.state_id),
+        let r = if back {
+            self.history.undo(cur, self.state_id)
+        } else {
+            self.history.redo(cur, self.state_id)
+        };
+        match r {
+            Ok(s) => {
+                self.doc.state = s.state;
+                self.invalidate_between(&before);
+                self.state_id = s.state_id;
+                true
+            }
             Err(cur) => {
                 self.doc.state = cur;
                 false
             }
         }
-    }
-
-    fn restore(&mut self, state: DocState, id: u64) -> bool {
-        let old = std::mem::replace(&mut self.doc.state, state);
-        self.invalidate_between(&old);
-        self.state_id = id;
-        true
     }
 
     // ---- painting -------------------------------------------------------
@@ -712,6 +793,66 @@ impl Editor {
         Ok(())
     }
 
+    /// What Delete does: erase the selected pixels of raster layers, and
+    /// remove objects, groups (and several selected layers) outright.
+    pub fn delete_key(&mut self) -> Result<(), Refusal> {
+        if self.is_busy() {
+            return Err(Refusal::Busy);
+        }
+        let ids = self.selected_layers();
+        let has_sel = self.doc.state.selection.is_some();
+        let all_raster = ids
+            .iter()
+            .all(|id| self.doc.find(*id).is_some_and(|l| l.is_paintable()));
+        if ids.len() == 1 && all_raster {
+            return self.clear_selected();
+        }
+        if !has_sel {
+            self.delete_layers(&ids);
+            return Ok(());
+        }
+        if ids.len() == 1 {
+            // An object with a selection: erasing part of it needs pixels.
+            return self.clear_selected();
+        }
+        // Several layers and a selection: erase it from each raster layer.
+        let sel = self.doc.state.selection.clone().unwrap();
+        let mask = full_mask(&sel);
+        let touched = mask.touched().to_vec();
+        let paint = Paint {
+            color: [0; 3],
+            mode: PaintMode::Erase,
+            alpha_lock: false,
+        };
+        let targets: Vec<LayerId> = ids
+            .into_iter()
+            .filter(|id| {
+                self.doc.find(*id).is_some_and(|l| l.is_paintable())
+                    && self.doc.is_effectively_visible(*id)
+            })
+            .collect();
+        if targets.is_empty() {
+            return Err(Refusal::NoPixels);
+        }
+        self.commit("Delete", |doc| {
+            for id in &targets {
+                let Some(l) = doc.find_mut(*id) else { continue };
+                let grid = l.tiles_mut();
+                for &c in &touched {
+                    let (Some(m), Some(st)) = (mask.get(c), sel.tile(c)) else {
+                        continue;
+                    };
+                    if grid.get(c).is_none() {
+                        continue;
+                    }
+                    apply_mask_tile_sel(grid.get_mut_or_insert(c), m, Some(st), &paint);
+                }
+                grid.prune(touched.iter().copied());
+            }
+        });
+        Ok(())
+    }
+
     // ---- selection --------------------------------------------------------
 
     pub fn selection(&self) -> Option<&Selection> {
@@ -756,6 +897,62 @@ impl Editor {
         if let Some(m) = self.flood(x, y, &p, sample_all) {
             let s = Selection::from_mask(self.doc.width, self.doc.height, &m);
             self.select_shape(s, op);
+        }
+    }
+
+    /// Selects every pixel of a similar colour to the one at `(x, y)`,
+    /// anywhere on the canvas. With `soft`, colours just past the tolerance
+    /// are partly selected, for smooth edges.
+    pub fn select_color(
+        &mut self,
+        x: u32,
+        y: u32,
+        tolerance: u8,
+        soft: bool,
+        sample_all: bool,
+        op: SelectOp,
+    ) {
+        let (w, h) = (self.doc.width, self.doc.height);
+        if x >= w || y >= h {
+            return;
+        }
+        if sample_all {
+            self.projection.update_all(&self.doc, &NoOverride);
+        }
+        let tol = tolerance as f32;
+        let ramp = if soft { tol * 0.5 + 8.0 } else { 0.0 };
+        let cover = |seed: [u8; 4], q: [u8; 4]| -> u8 {
+            let d = (0..4)
+                .map(|c| (q[c] as i32 - seed[c] as i32).unsigned_abs())
+                .max()
+                .unwrap_or(0) as f32;
+            if d <= tol {
+                255
+            } else if ramp > 0.0 && d < tol + ramp {
+                (255.0 * (1.0 - (d - tol) / ramp) + 0.5) as u8
+            } else {
+                0
+            }
+        };
+        let s = if sample_all {
+            let proj = &self.projection;
+            let seed = proj.pixel(x, y);
+            Selection::from_fn(w, h, |x, y| cover(seed, proj.pixel(x, y)))
+        } else {
+            let g = &self.doc.active_layer().tiles;
+            let seed = g.pixel(x as i64, y as i64);
+            Selection::from_fn(w, h, |x, y| cover(seed, g.pixel(x as i64, y as i64)))
+        };
+        self.select_shape(s, op);
+    }
+
+    /// Moves the selection outline (not the pixels) by whole pixels.
+    pub fn translate_selection(&mut self, dx: i64, dy: i64) {
+        if dx == 0 && dy == 0 {
+            return;
+        }
+        if let Some(s) = self.selection().map(|s| s.translated(dx, dy)) {
+            self.set_selection("Move selection", Some(s));
         }
     }
 
@@ -822,43 +1019,39 @@ impl Editor {
         g
     }
 
-    /// Starts transforming the active layer, or the selected part of it.
-    pub fn begin_transform(&mut self, smooth: bool) -> Result<(), Refusal> {
-        if self.is_busy() {
-            return Err(Refusal::Busy);
-        }
-        let l = self.doc.active_layer();
+    /// Builds the transform part for one layer, with its handle frame.
+    fn transform_part(&self, l: &Layer) -> Result<(Part, Affine, (f32, f32)), Refusal> {
         if !self.doc.is_effectively_visible(l.id) {
             return Err(Refusal::LayerHidden);
         }
         let (w, h) = (self.doc.width, self.doc.height);
         let id = l.id;
         let kind = l.kind();
-        let t = match &l.content {
-            Content::Image(obj) => Transforming {
-                layer: id,
-                kind,
-                src: obj.source.clone(),
-                src_m: obj.transform,
-                frame: obj.transform,
-                size: obj.natural_size(),
-                delta: Affine::IDENTITY,
-                smooth: obj.smooth,
-                base: None,
-                sel: None,
-            },
-            Content::Text(obj) => Transforming {
-                layer: id,
-                kind,
-                src: Arc::new(Source::new((*l.tiles).clone(), w, h)),
-                src_m: Affine::IDENTITY,
-                frame: obj.transform,
-                size: obj.bbox,
-                delta: Affine::IDENTITY,
-                smooth: true,
-                base: None,
-                sel: None,
-            },
+        Ok(match &l.content {
+            Content::Image(obj) => (
+                Part {
+                    layer: id,
+                    kind,
+                    src: obj.source.clone(),
+                    src_m: obj.transform,
+                    base: None,
+                    sel: None,
+                },
+                obj.transform,
+                obj.natural_size(),
+            ),
+            Content::Text(obj) => (
+                Part {
+                    layer: id,
+                    kind,
+                    src: Arc::new(Source::new((*l.tiles).clone(), w, h)),
+                    src_m: Affine::IDENTITY,
+                    base: None,
+                    sel: None,
+                },
+                obj.transform,
+                obj.bbox,
+            ),
             _ => {
                 let pixels = self.layer_pixels(l);
                 let sel = if l.is_group() {
@@ -873,23 +1066,93 @@ impl Editor {
                 let Some((x0, y0, x1, y1)) = content_bounds(&float) else {
                     return Err(Refusal::LayerEmpty);
                 };
-                Transforming {
-                    layer: id,
-                    kind,
-                    src: Arc::new(Source::new(float, w, h)),
-                    src_m: Affine::IDENTITY,
-                    frame: Affine::translate(x0 as f32, y0 as f32),
-                    size: ((x1 - x0) as f32, (y1 - y0) as f32),
-                    delta: Affine::IDENTITY,
-                    smooth,
-                    base: base.map(Arc::new),
-                    sel,
+                (
+                    Part {
+                        layer: id,
+                        kind,
+                        src: Arc::new(Source::new(float, w, h)),
+                        src_m: Affine::IDENTITY,
+                        base: base.map(Arc::new),
+                        sel,
+                    },
+                    Affine::translate(x0 as f32, y0 as f32),
+                    ((x1 - x0) as f32, (y1 - y0) as f32),
+                )
+            }
+        })
+    }
+
+    /// Starts transforming the selected layers (or the selected part of
+    /// them).
+    pub fn begin_transform(&mut self, smooth: bool) -> Result<(), Refusal> {
+        if self.is_busy() {
+            return Err(Refusal::Busy);
+        }
+        let ids = self.selected_layers();
+        let mut built = vec![];
+        let mut refusal = Refusal::LayerEmpty;
+        for id in &ids {
+            let Some(l) = self.doc.find(*id) else {
+                continue;
+            };
+            match self.transform_part(l) {
+                Ok(p) => built.push(p),
+                // Hidden or empty layers just stay put, unless all are.
+                Err(r) => {
+                    if *id == self.doc.state.active || refusal != Refusal::LayerHidden {
+                        refusal = r;
+                    }
                 }
             }
+        }
+        if built.is_empty() {
+            return Err(refusal);
+        }
+        // Keep the active layer first: it names the transform.
+        let active = self.doc.state.active;
+        if let Some(i) = built.iter().position(|(p, ..)| p.layer == active) {
+            built.swap(0, i);
+        }
+        let (frame, size) = if built.len() == 1 {
+            (built[0].1, built[0].2)
+        } else {
+            // Several layers: one upright box around them all.
+            let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for (_, f, (w, h)) in &built {
+                for (x, y) in [(0.0, 0.0), (*w, 0.0), (*w, *h), (0.0, *h)] {
+                    let (px, py) = f.apply(x, y);
+                    x0 = x0.min(px);
+                    y0 = y0.min(py);
+                    x1 = x1.max(px);
+                    y1 = y1.max(py);
+                }
+            }
+            (
+                Affine::translate(x0, y0),
+                ((x1 - x0).max(1.0), (y1 - y0).max(1.0)),
+            )
+        };
+        let first = &built[0].0;
+        let (layer, kind) = (first.layer, first.kind);
+        // Images keep their own sampling setting when moved alone.
+        let smooth = match self.doc.find(layer).map(|l| &l.content) {
+            Some(Content::Image(o)) if built.len() == 1 => o.smooth,
+            Some(Content::Text(_)) if built.len() == 1 => true,
+            _ => smooth,
+        };
+        let t = Transforming {
+            layer,
+            kind,
+            parts: built.into_iter().map(|b| b.0).collect(),
+            frame,
+            size,
+            delta: Affine::IDENTITY,
+            smooth,
         };
         let (cols, rows) = self.doc.grid_dims();
         let r = t.dest_rect(cols, rows);
         self.transform = Some(t);
+        self.projection.reset_below_cache();
         self.projection.invalidate_rect(r);
         Ok(())
     }
@@ -915,15 +1178,7 @@ impl Editor {
             let (cols, rows) = self.doc.grid_dims();
             self.projection.reset_below_cache();
             self.projection.invalidate_rect(t.dest_rect(cols, rows));
-            let id = TileRect {
-                x0: 0,
-                y0: 0,
-                x1: 0,
-                y1: 0,
-            };
-            let start = t.src.dest_tiles(&t.src_m, cols, rows);
-            self.projection
-                .invalidate_rect(if start.is_empty() { id } else { start });
+            self.projection.invalidate_rect(t.start_rect(cols, rows));
         }
     }
 
@@ -932,8 +1187,7 @@ impl Editor {
             return;
         };
         let (cols, rows) = self.doc.grid_dims();
-        let start = t.src.dest_tiles(&t.src_m, cols, rows);
-        self.projection.invalidate_rect(start);
+        self.projection.invalidate_rect(t.start_rect(cols, rows));
         self.projection.reset_below_cache();
         if t.delta == Affine::IDENTITY {
             self.projection.invalidate_rect(t.dest_rect(cols, rows));
@@ -946,66 +1200,87 @@ impl Editor {
         } else {
             "Transform"
         };
-        match t.kind {
-            Kind::Image | Kind::Text => {
-                self.commit(label, |doc| {
-                    if let Some(l) = doc.find_mut(t.layer) {
-                        transform_object(l, &delta, w, h);
-                    }
-                });
-            }
-            Kind::Group => {
-                let smooth = t.smooth;
-                self.commit(label, |doc| {
-                    if let Some(l) = doc.find_mut(t.layer) {
-                        l.walk_mut(&mut |d| match d.kind() {
-                            Kind::Raster => {
-                                d.tiles = Arc::new(transform_grid(&d.tiles, &delta, smooth, w, h))
+        let smooth = t.smooth;
+        // Render outside the commit (it may be slow), then swap in.
+        enum Out {
+            Object(LayerId),
+            Group(LayerId),
+            Raster(LayerId, TileGrid),
+        }
+        let mut outs = vec![];
+        let mut new_sel = None;
+        for p in &t.parts {
+            match p.kind {
+                Kind::Image | Kind::Text => outs.push(Out::Object(p.layer)),
+                Kind::Group => outs.push(Out::Group(p.layer)),
+                Kind::Raster => {
+                    let rendered = if !smooth && delta.is_translation() && p.base.is_none() {
+                        p.src
+                            .base
+                            .translated(delta.m[4].round() as i64, delta.m[5].round() as i64)
+                    } else {
+                        p.src.render(&delta.compose(p.src_m), smooth, w, h)
+                    };
+                    let out = match &p.base {
+                        None => rendered,
+                        Some(b) => {
+                            let mut out = (**b).clone();
+                            for (c, tile) in rendered.iter() {
+                                if out.get(c).is_none() {
+                                    out.set(c, Some(tile.clone()));
+                                } else {
+                                    blend_tile(
+                                        out.get_mut_or_insert(c),
+                                        tile,
+                                        255,
+                                        BlendMode::Normal,
+                                    );
+                                }
                             }
-                            Kind::Image | Kind::Text => transform_object(d, &delta, w, h),
-                            Kind::Group => {}
-                        });
+                            out
+                        }
+                    };
+                    if new_sel.is_none()
+                        && let Some(s) = &p.sel
+                    {
+                        let g = transform_grid(&s.to_grid(), &delta, smooth, w, h);
+                        new_sel = Some(Arc::new(Selection::from_alpha(w, h, &g)));
                     }
-                });
+                    outs.push(Out::Raster(p.layer, out));
+                }
             }
-            Kind::Raster => {
-                let rendered = if !t.smooth && delta.is_translation() && t.base.is_none() {
-                    t.src
-                        .base
-                        .translated(delta.m[4].round() as i64, delta.m[5].round() as i64)
-                } else {
-                    t.src.render(&t.matrix(), t.smooth, w, h)
-                };
-                let mut out = t
-                    .base
-                    .as_deref()
-                    .cloned()
-                    .unwrap_or_else(|| TileGrid::new(w, h));
-                if t.base.is_none() {
-                    out = rendered;
-                } else {
-                    for (c, tile) in rendered.iter() {
-                        if out.get(c).is_none() {
-                            out.set(c, Some(tile.clone()));
-                        } else {
-                            blend_tile(out.get_mut_or_insert(c), tile, 255, BlendMode::Normal);
+        }
+        self.commit(label, |doc| {
+            for o in outs {
+                match o {
+                    Out::Object(id) => {
+                        if let Some(l) = doc.find_mut(id) {
+                            transform_object(l, &delta, w, h);
+                        }
+                    }
+                    Out::Group(id) => {
+                        if let Some(l) = doc.find_mut(id) {
+                            l.walk_mut(&mut |d| match d.kind() {
+                                Kind::Raster => {
+                                    d.tiles =
+                                        Arc::new(transform_grid(&d.tiles, &delta, smooth, w, h))
+                                }
+                                Kind::Image | Kind::Text => transform_object(d, &delta, w, h),
+                                Kind::Group => {}
+                            });
+                        }
+                    }
+                    Out::Raster(id, g) => {
+                        if let Some(l) = doc.find_mut(id) {
+                            l.tiles = Arc::new(g);
                         }
                     }
                 }
-                let new_sel = t.sel.as_ref().map(|s| {
-                    let g = transform_grid(&s.to_grid(), &delta, t.smooth, w, h);
-                    Arc::new(Selection::from_alpha(w, h, &g))
-                });
-                self.commit(label, |doc| {
-                    if let Some(l) = doc.find_mut(t.layer) {
-                        l.tiles = Arc::new(out);
-                    }
-                    if new_sel.is_some() {
-                        doc.state.selection = new_sel;
-                    }
-                });
             }
-        }
+            if new_sel.is_some() {
+                doc.state.selection = new_sel;
+            }
+        });
     }
 
     /// Flips or rotates the active layer in place, about its centre.
@@ -1149,13 +1424,105 @@ impl Editor {
 
     // ---- layers -------------------------------------------------------------
 
+    /// Makes `id` the active layer and the only selected one.
     pub fn select_layer(&mut self, id: LayerId) {
-        if self.doc.find(id).is_some() && !self.is_busy() && self.doc.state.active != id {
+        if self.doc.find(id).is_none() || self.is_busy() {
+            return;
+        }
+        self.extra.clear();
+        self.set_active(id);
+    }
+
+    fn set_active(&mut self, id: LayerId) {
+        if self.doc.state.active != id {
             self.doc.state.active = id;
             if self.onion.is_some() {
                 self.invalidate_all();
             }
         }
+    }
+
+    /// Whether a layer is selected (the active one always is).
+    pub fn is_layer_selected(&self, id: LayerId) -> bool {
+        id == self.doc.state.active || self.extra.contains(&id)
+    }
+
+    /// Adds a layer to the selection or takes it out (Ctrl-click).
+    pub fn toggle_layer(&mut self, id: LayerId) {
+        if self.doc.find(id).is_none() || self.is_busy() {
+            return;
+        }
+        self.prune_extra();
+        let active = self.doc.state.active;
+        if id == active {
+            // Hand "active" to another selected layer, if there is one.
+            if let Some(next) = self.extra.pop() {
+                self.set_active(next);
+            }
+        } else if let Some(i) = self.extra.iter().position(|x| *x == id) {
+            self.extra.remove(i);
+        } else {
+            self.extra.push(active);
+            self.set_active(id);
+        }
+    }
+
+    /// Selects every layer listed between the active one and `id`
+    /// (Shift-click), keeping the active layer as the anchor.
+    pub fn select_layer_range(&mut self, id: LayerId) {
+        if self.doc.find(id).is_none() || self.is_busy() {
+            return;
+        }
+        let rows: Vec<LayerId> = self.doc.display_rows().iter().map(|r| r.0).collect();
+        let active = self.doc.state.active;
+        let (Some(a), Some(b)) = (
+            rows.iter().position(|x| *x == active),
+            rows.iter().position(|x| *x == id),
+        ) else {
+            self.select_layer(id);
+            return;
+        };
+        let (lo, hi) = (a.min(b), a.max(b));
+        self.extra = rows[lo..=hi]
+            .iter()
+            .copied()
+            .filter(|x| *x != active)
+            .collect();
+    }
+
+    fn prune_extra(&mut self) {
+        let active = self.doc.state.active;
+        let doc = &self.doc;
+        self.extra
+            .retain(|id| *id != active && doc.find(*id).is_some());
+        self.extra.dedup();
+    }
+
+    /// The selected layers, bottom first, leaving out layers inside a
+    /// selected group (the group stands for them).
+    pub fn selected_layers(&self) -> Vec<LayerId> {
+        let mut out = vec![];
+        let active = self.doc.state.active;
+        let sel = |id: LayerId| id == active || self.extra.contains(&id);
+        fn go(ls: &[Layer], sel: &dyn Fn(LayerId) -> bool, out: &mut Vec<LayerId>) {
+            for l in ls {
+                if sel(l.id) {
+                    out.push(l.id);
+                } else {
+                    go(l.children(), sel, out);
+                }
+            }
+        }
+        go(self.doc.layers(), &sel, &mut out);
+        if out.is_empty() {
+            out.push(active);
+        }
+        out
+    }
+
+    /// How many layers are selected.
+    pub fn selection_count(&self) -> usize {
+        self.selected_layers().len()
     }
 
     /// Where a new layer goes: just above the active one, beside it.
@@ -1202,17 +1569,35 @@ impl Editor {
     }
 
     pub fn delete_layer(&mut self, id: LayerId) -> bool {
-        if self.doc.layer_count() <= 1 || self.doc.find(id).is_none() {
+        self.delete_layers(&[id])
+    }
+
+    /// Deletes layers in one step. Deleting every layer leaves a fresh,
+    /// empty one behind.
+    pub fn delete_layers(&mut self, ids: &[LayerId]) -> bool {
+        let ids: Vec<LayerId> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.doc.find(*id).is_some())
+            .collect();
+        if ids.is_empty() || self.is_busy() {
             return false;
         }
-        if self.doc.layers().len() == 1 && self.doc.layers()[0].id == id {
-            return false;
-        }
-        self.commit("Delete layer", |doc| {
-            let Some((_, place)) = doc.take(id) else {
-                return;
-            };
-            if doc.state.active == id || doc.find(doc.state.active).is_none() {
+        let label = if ids.len() > 1 {
+            "Delete layers"
+        } else {
+            "Delete layer"
+        };
+        self.commit(label, |doc| {
+            let mut last = None;
+            for id in &ids {
+                if let Some((_, place)) = doc.take(*id) {
+                    last = Some(place);
+                }
+            }
+            if doc.find(doc.state.active).is_none()
+                && let Some(place) = last
+            {
                 let sib = doc.siblings(place.parent);
                 doc.state.active = if sib.is_empty() {
                     place.parent.unwrap_or(0)
@@ -1221,27 +1606,60 @@ impl Editor {
                 };
             }
         });
+        self.extra.clear();
         true
     }
 
     pub fn duplicate_layer(&mut self, id: LayerId) {
-        let Some(place) = self.doc.place_of(id) else {
+        self.duplicate_layers(&[id]);
+    }
+
+    /// Duplicates layers, each just above itself; the copies become the
+    /// selection.
+    pub fn duplicate_layers(&mut self, ids: &[LayerId]) {
+        let ids: Vec<LayerId> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.doc.place_of(*id).is_some())
+            .collect();
+        if ids.is_empty() {
             return;
-        };
-        self.commit("Duplicate layer", |doc| {
-            let mut l = doc.find(id).unwrap().clone();
-            doc.reassign_ids(&mut l);
-            l.name = format!("{} copy", l.name);
-            let nid = l.id;
-            doc.put(
-                l,
-                Place {
-                    parent: place.parent,
-                    index: place.index + 1,
-                },
-            );
-            doc.state.active = nid;
-        });
+        }
+        let active = self.doc.state.active;
+        let mut copies = vec![];
+        self.commit(
+            if ids.len() > 1 {
+                "Duplicate layers"
+            } else {
+                "Duplicate layer"
+            },
+            |doc| {
+                for id in &ids {
+                    let Some(place) = doc.place_of(*id) else {
+                        continue;
+                    };
+                    let mut l = doc.find(*id).unwrap().clone();
+                    doc.reassign_ids(&mut l);
+                    l.name = format!("{} copy", l.name);
+                    let nid = l.id;
+                    doc.put(
+                        l,
+                        Place {
+                            parent: place.parent,
+                            index: place.index + 1,
+                        },
+                    );
+                    copies.push((*id, nid));
+                }
+                doc.state.active = copies
+                    .iter()
+                    .find(|(o, _)| *o == active)
+                    .or(copies.last())
+                    .map_or(active, |c| c.1);
+            },
+        );
+        let a = self.doc.state.active;
+        self.extra = copies.iter().map(|c| c.1).filter(|c| *c != a).collect();
     }
 
     /// The layer directly below `id` among its siblings.
@@ -1308,6 +1726,56 @@ impl Editor {
         true
     }
 
+    /// Merges the selected layers into the lowest of them (or merges the
+    /// active layer down when it is the only one selected).
+    pub fn merge_selected(&mut self) -> bool {
+        let ids = self.selected_layers();
+        if ids.len() < 2 {
+            return self.merge_down(self.doc.state.active);
+        }
+        let layers: Vec<Layer> = ids
+            .iter()
+            .filter_map(|id| self.doc.find(*id).cloned())
+            .collect();
+        let mut rect: Option<TileRect> = None;
+        for l in &layers {
+            l.walk(&mut |d| {
+                if let Some(b) = d.tiles.bounds() {
+                    rect = Some(rect.map_or(b, |r| r.union(b)));
+                }
+            });
+        }
+        let mut g = TileGrid::new(self.doc.width, self.doc.height);
+        if let Some(r) = rect {
+            for c in r.iter() {
+                let mut t = Tile::filled([0; 4]);
+                compose_list(&layers, c, &mut t, &NoOverride);
+                if !t.is_empty() {
+                    g.set(c, Some(Arc::new(t)));
+                }
+            }
+        }
+        let target = ids[0];
+        self.commit("Merge layers", |doc| {
+            let frames = doc.state.frames;
+            for id in &ids[1..] {
+                doc.take(*id);
+            }
+            if let Some(l) = doc.find_mut(target) {
+                l.tiles = Arc::new(g);
+                l.content = Content::Raster;
+                l.cels = vec![None; frames];
+                l.opacity = 1.0;
+                l.blend = BlendMode::Normal;
+                l.clip = false;
+                l.visible = true;
+            }
+            doc.state.active = target;
+        });
+        self.extra.clear();
+        true
+    }
+
     /// Moves a layer to a new place in the tree (index counted after the
     /// layer is removed from its old place). Refuses to put a group inside
     /// itself.
@@ -1331,20 +1799,92 @@ impl Editor {
         });
     }
 
+    /// Moves several layers next to (or into) `anchor`, keeping their
+    /// order. Does nothing if the anchor is one of them or inside one.
+    pub fn move_layers(&mut self, ids: &[LayerId], drop: DropAt) {
+        let anchor = match drop {
+            DropAt::Above(a) | DropAt::Below(a) | DropAt::Into(a) => a,
+        };
+        if ids.is_empty()
+            || ids.contains(&anchor)
+            || self.doc.ancestors(anchor).iter().any(|g| ids.contains(g))
+        {
+            return;
+        }
+        let active = self.doc.state.active;
+        let extra = self.extra.clone();
+        let ids = ids.to_vec();
+        self.commit("Reorder layers", |doc| {
+            let mut taken = vec![];
+            for id in &ids {
+                if let Some((l, _)) = doc.take(*id) {
+                    taken.push(l);
+                }
+            }
+            let (parent, mut index) = match drop {
+                DropAt::Into(g) => (Some(g), doc.find(g).map_or(0, |l| l.children().len())),
+                DropAt::Above(a) | DropAt::Below(a) => {
+                    let Some(p) = doc.place_of(a) else { return };
+                    (
+                        p.parent,
+                        if matches!(drop, DropAt::Above(_)) {
+                            p.index + 1
+                        } else {
+                            p.index
+                        },
+                    )
+                }
+            };
+            for l in taken {
+                doc.put(l, Place { parent, index });
+                index += 1;
+            }
+            doc.state.active = active;
+        });
+        self.extra = extra;
+    }
+
     /// Wraps a layer in a new group.
     pub fn group_layer(&mut self, id: LayerId) {
-        let Some(place) = self.doc.place_of(id) else {
-            return;
-        };
-        self.commit("Group layer", |doc| {
+        self.group_layers(&[id]);
+    }
+
+    /// Wraps layers in one new group, placed where the topmost was.
+    pub fn group_layers(&mut self, ids: &[LayerId]) {
+        let ids: Vec<LayerId> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.doc.place_of(*id).is_some())
+            .collect();
+        let Some(&top) = ids.last() else { return };
+        self.commit("Group layers", |doc| {
             let mut g = doc.new_group(doc.next_name("Group"));
             let gid = g.id;
-            if let Some((l, _)) = doc.take(id) {
-                g.children_mut().unwrap().push(l);
+            // Where the group goes: the topmost layer's spot, adjusted for
+            // the siblings below it that are being moved in.
+            let place = doc.place_of(top).unwrap();
+            let below = ids
+                .iter()
+                .filter(|id| {
+                    doc.place_of(**id)
+                        .is_some_and(|p| p.parent == place.parent && p.index < place.index)
+                })
+                .count();
+            for id in &ids {
+                if let Some((l, _)) = doc.take(*id) {
+                    g.children_mut().unwrap().push(l);
+                }
             }
-            doc.put(g, place);
+            doc.put(
+                g,
+                Place {
+                    parent: place.parent,
+                    index: place.index - below,
+                },
+            );
             doc.state.active = gid;
         });
+        self.extra.clear();
     }
 
     /// Replaces a group by its children.
@@ -1411,6 +1951,28 @@ impl Editor {
         self.commit(label, |doc| {
             if let Some(l) = doc.find_mut(id) {
                 f(l);
+            }
+        });
+    }
+
+    /// Changes properties of several layers as one undo step.
+    pub fn set_layers(&mut self, ids: &[LayerId], label: &str, f: impl Fn(&mut Layer)) {
+        self.commit(label, |doc| {
+            for id in ids {
+                if let Some(l) = doc.find_mut(*id) {
+                    f(l);
+                }
+            }
+        });
+    }
+
+    /// Like [`set_layers`](Self::set_layers), merging repeated calls.
+    pub fn set_layers_coalesced(&mut self, ids: &[LayerId], label: &str, f: impl Fn(&mut Layer)) {
+        self.commit_coalesced(label, |doc| {
+            for id in ids {
+                if let Some(l) = doc.find_mut(*id) {
+                    f(l);
+                }
             }
         });
     }
@@ -2339,5 +2901,143 @@ mod tests {
         assert!((p[0] as i32 - 160).abs() <= 4, "{p:?}");
         ed.rasterize(id);
         assert_eq!(ed.doc.find(id).unwrap().kind(), Kind::Raster);
+    }
+
+    #[test]
+    fn undo_keeps_size_and_redraws_only_changes() {
+        let mut ed = Editor::new(Document::new(256, 256, None));
+        ed.update_projection(None, usize::MAX);
+        ed.line(brush(), paint([1, 2, 3]), (10.0, 10.0), (30.0, 10.0))
+            .unwrap();
+        ed.update_projection(None, usize::MAX);
+        let g = ed.size_gen;
+        assert!(ed.undo());
+        assert_eq!(ed.size_gen, g, "same-size undo must not look like a resize");
+        assert!(ed.redo());
+        assert_eq!(ed.size_gen, g);
+        ed.crop(0, 0, 100, 100);
+        assert!(ed.undo());
+        assert_eq!((ed.doc.width, ed.doc.height), (256, 256));
+    }
+
+    #[test]
+    fn multi_layer_selection_ops() {
+        let mut ed = Editor::new(Document::new(128, 128, None));
+        let a = ed.doc.active_id();
+        ed.line(brush(), paint([255, 0, 0]), (10.0, 10.0), (20.0, 10.0))
+            .unwrap();
+        ed.add_layer();
+        let b = ed.doc.active_id();
+        ed.line(brush(), paint([0, 255, 0]), (10.0, 50.0), (20.0, 50.0))
+            .unwrap();
+        ed.add_layer();
+        let c = ed.doc.active_id();
+        assert_eq!(ed.selected_layers(), vec![c]);
+        ed.toggle_layer(a);
+        assert_eq!(ed.doc.active_id(), a);
+        assert_eq!(ed.selected_layers(), vec![a, c]);
+        ed.select_layer_range(c);
+        assert_eq!(ed.selected_layers(), vec![a, b, c]);
+
+        // Moving several layers moves them all, as one step.
+        ed.toggle_layer(c);
+        assert_eq!(ed.selected_layers(), vec![a, b]);
+        ed.begin_transform(false).unwrap();
+        ed.set_transform(Affine::translate(40.0, 0.0), false);
+        ed.commit_transform();
+        assert_eq!(
+            ed.doc.find(a).unwrap().tiles.pixel(55, 10),
+            [255, 0, 0, 255]
+        );
+        assert_eq!(
+            ed.doc.find(b).unwrap().tiles.pixel(55, 50),
+            [0, 255, 0, 255]
+        );
+        assert_eq!(ed.doc.find(a).unwrap().tiles.pixel(15, 10), [0; 4]);
+        ed.undo();
+        assert_eq!(
+            ed.doc.find(a).unwrap().tiles.pixel(15, 10),
+            [255, 0, 0, 255]
+        );
+        assert_eq!(
+            ed.doc.find(b).unwrap().tiles.pixel(15, 50),
+            [0, 255, 0, 255]
+        );
+
+        // Grouping keeps order; reordering moves the set together.
+        ed.select_layer(a);
+        ed.toggle_layer(b);
+        ed.group_layers(&ed.selected_layers());
+        let g = ed.doc.active_id();
+        let kids: Vec<_> = ed
+            .doc
+            .find(g)
+            .unwrap()
+            .children()
+            .iter()
+            .map(|l| l.id)
+            .collect();
+        assert_eq!(kids, vec![a, b]);
+        assert_eq!(ed.doc.layers().len(), 2);
+        assert_eq!(ed.doc.layers()[0].id, g);
+        ed.select_layer(a);
+        ed.toggle_layer(b);
+        ed.move_layers(&ed.selected_layers(), DropAt::Above(c));
+        let root: Vec<_> = ed.doc.layers().iter().map(|l| l.id).collect();
+        assert_eq!(root, vec![g, c, a, b]);
+
+        // Merge flattens the selection into its lowest layer.
+        ed.select_layer(a);
+        ed.toggle_layer(b);
+        assert!(ed.merge_selected());
+        let l = ed.doc.find(a).unwrap();
+        assert_eq!(l.tiles.pixel(15, 10), [255, 0, 0, 255]);
+        assert_eq!(l.tiles.pixel(15, 50), [0, 255, 0, 255]);
+        assert!(ed.doc.find(b).is_none());
+
+        // Duplicating selects the copies; deleting everything leaves a layer.
+        ed.select_layer(a);
+        ed.toggle_layer(c);
+        ed.duplicate_layers(&ed.selected_layers());
+        assert_eq!(ed.selection_count(), 2);
+        assert!(!ed.is_layer_selected(a));
+        let all: Vec<_> = ed.doc.layers().iter().map(|l| l.id).collect();
+        ed.delete_layers(&all);
+        assert_eq!(ed.doc.layer_count(), 1);
+    }
+
+    #[test]
+    fn delete_key_removes_objects_and_clears_pixels() {
+        let mut ed = Editor::new(Document::new(128, 128, None));
+        ed.line(brush(), paint([9, 9, 9]), (10.0, 10.0), (20.0, 10.0))
+            .unwrap();
+        let rgba = vec![255u8; 8 * 8 * 4];
+        let img = ed.place_image("img", Source::from_rgba(8, 8, &rgba), Some((64.0, 64.0)));
+        ed.delete_key().unwrap();
+        assert!(ed.doc.find(img).is_none());
+        assert_eq!(ed.doc.layer_count(), 1);
+        // A raster layer keeps the old behaviour: it is cleared, not removed.
+        ed.delete_key().unwrap();
+        assert_eq!(ed.doc.layer_count(), 1);
+        assert!(ed.doc.active_layer().tiles.is_empty());
+    }
+
+    #[test]
+    fn colour_select_is_global() {
+        let mut ed = Editor::new(Document::new(128, 128, Some([255; 3])));
+        // Two separate red marks and a blue one.
+        ed.line(brush(), paint([255, 0, 0]), (10.0, 10.0), (20.0, 10.0))
+            .unwrap();
+        ed.line(brush(), paint([255, 0, 0]), (100.0, 100.0), (110.0, 100.0))
+            .unwrap();
+        ed.line(brush(), paint([0, 0, 255]), (10.0, 100.0), (20.0, 100.0))
+            .unwrap();
+        ed.select_color(15, 10, 10, false, true, SelectOp::Replace);
+        let s = ed.selection().unwrap();
+        assert_eq!(s.value(105, 100), 255);
+        assert_eq!(s.value(15, 100), 0);
+        assert_eq!(s.value(60, 60), 0);
+        ed.select_color(15, 100, 10, false, true, SelectOp::Add);
+        assert_eq!(ed.selection().unwrap().value(15, 100), 255);
     }
 }

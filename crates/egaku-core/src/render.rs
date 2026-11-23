@@ -24,10 +24,10 @@ use crate::tile::{TILE, Tile, TileCoord, TileRect, tiles_for};
 /// committed: a stroke in progress, a layer being moved or transformed, an
 /// adjustment being previewed, onion skins.
 pub trait Ov: Sync {
-    /// The layer being modified, if any. Everything below its root-level
-    /// ancestor is cached while the override lasts. `tile` and `under` are
-    /// only consulted for this layer.
-    fn layer(&self) -> Option<LayerId>;
+    /// The layers being modified, if any. Everything below the lowest of
+    /// their root-level ancestors is cached while the override lasts. `tile`
+    /// and `under` are only consulted for these layers.
+    fn layers(&self) -> &[LayerId];
     /// Replacement pixels for one tile of `l`: `None` if `l` isn't
     /// overridden, `Some(None)` if the tile becomes empty.
     fn tile(&self, l: &Layer, c: TileCoord) -> Option<Option<Tile>>;
@@ -39,8 +39,8 @@ pub trait Ov: Sync {
 pub struct NoOverride;
 
 impl Ov for NoOverride {
-    fn layer(&self) -> Option<LayerId> {
-        None
+    fn layers(&self) -> &[LayerId] {
+        &[]
     }
     fn tile(&self, _: &Layer, _: TileCoord) -> Option<Option<Tile>> {
         None
@@ -51,16 +51,16 @@ impl Ov for NoOverride {
 /// blend mode: its tiles, or for a group its children composited in
 /// isolation.
 pub fn layer_content<'a>(l: &'a Layer, c: TileCoord, ov: &dyn Ov) -> Option<Cow<'a, Tile>> {
-    content(l, c, ov, ov.layer())
+    content(l, c, ov, ov.layers())
 }
 
 fn content<'a>(
     l: &'a Layer,
     c: TileCoord,
     ov: &dyn Ov,
-    target: Option<LayerId>,
+    target: &[LayerId],
 ) -> Option<Cow<'a, Tile>> {
-    if target == Some(l.id)
+    if target.contains(&l.id)
         && let Some(t) = ov.tile(l, c)
     {
         return t.map(Cow::Owned);
@@ -88,10 +88,10 @@ fn content<'a>(
 /// beneath it (its base), as if the base were opaque; the base's alpha,
 /// opacity and blend mode then apply to the result, as in Photoshop.
 pub fn compose_list(layers: &[Layer], c: TileCoord, out: &mut Tile, ov: &dyn Ov) {
-    list(layers, c, out, ov, ov.layer());
+    list(layers, c, out, ov, ov.layers());
 }
 
-fn list(layers: &[Layer], c: TileCoord, out: &mut Tile, ov: &dyn Ov, target: Option<LayerId>) {
+fn list(layers: &[Layer], c: TileCoord, out: &mut Tile, ov: &dyn Ov, target: &[LayerId]) {
     let n = layers.len();
     let mut i = 0;
     while i < n {
@@ -101,7 +101,7 @@ fn list(layers: &[Layer], c: TileCoord, out: &mut Tile, ov: &dyn Ov, target: Opt
             j += 1;
         }
         if base.is_shown() {
-            if target == Some(base.id) {
+            if target.contains(&base.id) {
                 ov.under(base, c, out);
             }
             if let Some(t) = content(base, c, ov, target) {
@@ -119,13 +119,7 @@ fn list(layers: &[Layer], c: TileCoord, out: &mut Tile, ov: &dyn Ov, target: Opt
     }
 }
 
-fn apply_clips(
-    base: &mut Tile,
-    clips: &[Layer],
-    c: TileCoord,
-    ov: &dyn Ov,
-    target: Option<LayerId>,
-) {
+fn apply_clips(base: &mut Tile, clips: &[Layer], c: TileCoord, ov: &dyn Ov, target: &[LayerId]) {
     // Remember the base's alpha and make it opaque.
     let mut alpha = [0u8; crate::tile::TILE_PX];
     for (a, p) in alpha.iter_mut().zip(base.px.iter_mut()) {
@@ -143,7 +137,7 @@ fn apply_clips(
         if !l.is_shown() {
             continue;
         }
-        if target == Some(l.id) {
+        if target.contains(&l.id) {
             ov.under(l, c, base);
         }
         if let Some(t) = content(l, c, ov, target) {
@@ -198,7 +192,7 @@ pub struct Projection {
     height: u32,
     levels: Vec<Level>,
     below: HashMap<TileCoord, Box<Tile>>,
-    below_key: Option<(LayerId, usize)>,
+    below_key: Option<(Vec<LayerId>, usize)>,
     changed: Vec<(u8, TileCoord)>,
 }
 
@@ -336,12 +330,17 @@ impl Projection {
 
     fn compose(&mut self, doc: &Document, ov: &dyn Ov, todo: &[TileCoord]) {
         let layers = doc.layers();
-        let start = ov.layer().and_then(|id| root_unit_start(doc, id));
+        let ids = ov.layers();
+        let start = ids.iter().filter_map(|id| root_unit_start(doc, *id)).min();
         // Fill the below-the-edit cache for tiles that lack it.
-        if let (Some(id), Some(start)) = (ov.layer(), start) {
-            if self.below_key != Some((id, start)) {
+        if let Some(start) = start {
+            if self
+                .below_key
+                .as_ref()
+                .is_none_or(|(k, s)| k.as_slice() != ids || *s != start)
+            {
                 self.below.clear();
-                self.below_key = Some((id, start));
+                self.below_key = Some((ids.to_vec(), start));
             }
             let missing: Vec<TileCoord> = todo
                 .iter()

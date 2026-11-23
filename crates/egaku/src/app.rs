@@ -53,6 +53,11 @@ pub enum Gesture {
         end: Pos2,
     },
     Lasso,
+    /// Dragging the selection outline itself with the select tool.
+    MoveSelection {
+        start: Pos2,
+        end: Pos2,
+    },
     Gradient {
         start: Pos2,
         end: Pos2,
@@ -159,6 +164,9 @@ enum IoDone {
     },
 }
 
+/// Closed selection outlines in canvas coordinates.
+pub type Contours = Arc<Vec<Vec<(f32, f32)>>>;
+
 pub struct Toast {
     pub text: String,
     pub warn: bool,
@@ -178,6 +186,8 @@ pub struct App {
     pub name: String,
     pub view: View,
     pub fit_pending: bool,
+    /// The next canvas size change keeps the view (undo/redo).
+    pub keep_view: bool,
     pub textures: CanvasTextures,
     pub tex_size_gen: u64,
     pub prefs: Prefs,
@@ -194,9 +204,10 @@ pub struct App {
     pub modal: Option<Modal>,
     pub thumbs: HashMap<LayerId, (usize, egui::TextureHandle)>,
     pub renaming: Option<(LayerId, String)>,
+    pub rename_fresh: bool,
     pub layer_drag: Option<LayerId>,
     /// Marching ants, cached per selection.
-    pub sel_outline: Option<(usize, Arc<Vec<[f32; 4]>>)>,
+    pub sel_outline: Option<(usize, Contours)>,
     pub lasso: Vec<Pos2>,
     /// Crop rectangle in canvas pixels: x0, y0, x1, y1.
     pub crop: Option<[f32; 4]>,
@@ -212,7 +223,10 @@ pub struct App {
     pub press_op: egaku_core::selection::SelectOp,
     pub fonts: Option<Vec<String>>,
     pub font_filter: String,
-    pub preset_previews: HashMap<&'static str, egui::TextureHandle>,
+    /// Stroke thumbnails of brushes, keyed by name, with the settings
+    /// they were drawn for.
+    pub preset_previews: HashMap<String, (egaku_core::brush::BrushParams, egui::TextureHandle)>,
+    pub pad: Option<crate::brush_editor::Pad>,
     io_tx: Sender<IoDone>,
     io_rx: Receiver<IoDone>,
     pub io_busy: Option<String>,
@@ -245,6 +259,7 @@ impl App {
             name: "Untitled".into(),
             view: View::default(),
             fit_pending: true,
+            keep_view: false,
             textures: CanvasTextures::default(),
             tex_size_gen: 0,
             fg_hsv: crate::color_picker::to_hsv(prefs.fg),
@@ -260,6 +275,7 @@ impl App {
             modal: None,
             thumbs: HashMap::new(),
             renaming: None,
+            rename_fresh: false,
             layer_drag: None,
             sel_outline: None,
             lasso: vec![],
@@ -273,6 +289,7 @@ impl App {
             fonts: None,
             font_filter: String::new(),
             preset_previews: HashMap::new(),
+            pad: None,
             io_tx,
             io_rx,
             io_busy: None,
@@ -369,6 +386,26 @@ impl App {
         self.crop = None;
     }
 
+    /// Steps back in history. The view stays where it is, even when the
+    /// step changes the canvas size.
+    pub fn undo(&mut self) {
+        self.cancel_modes();
+        let g = self.ed.size_gen;
+        self.ed.undo();
+        if self.ed.size_gen != g {
+            self.keep_view = true;
+        }
+    }
+
+    pub fn redo(&mut self) {
+        self.cancel_modes();
+        let g = self.ed.size_gen;
+        self.ed.redo();
+        if self.ed.size_gen != g {
+            self.keep_view = true;
+        }
+    }
+
     /// Abandons modal interactions.
     pub fn cancel_modes(&mut self) {
         self.ed.cancel_stroke();
@@ -393,6 +430,10 @@ impl App {
                 let id = self.ed.doc.active_id();
                 self.modal = Some(Modal::Rasterize(id));
                 return;
+            }
+            Refusal::NoPixels => {
+                "No pixels to erase in the selection here — deselect (Ctrl+D) to delete the layers"
+                    .to_string()
             }
             Refusal::Busy => return,
         };

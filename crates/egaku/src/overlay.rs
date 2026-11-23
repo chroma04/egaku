@@ -16,8 +16,12 @@ use crate::theme;
 
 const ANT: f32 = 4.0;
 
-/// Draws marching ants along screen-space segments.
-fn ants(painter: &egui::Painter, segs: &[(Pos2, Pos2)], phase: f32) {
+/// Draws marching ants along screen-space paths. Dashes are laid out by
+/// distance along each path, so they line up around corners and crawl in
+/// the path's direction: selection outlines run clockwise around what is
+/// selected, which makes holes visibly crawl the other way.
+fn ants(painter: &egui::Painter, paths: &[(Vec<Pos2>, bool)], phase: f32) {
+    let clip = painter.clip_rect().expand(4.0);
     let mut mesh = Mesh::default();
     let mut quad = |a: Pos2, b: Pos2, c: Color32| {
         let d = b - a;
@@ -33,28 +37,51 @@ fn ants(painter: &egui::Painter, segs: &[(Pos2, Pos2)], phase: f32) {
         mesh.add_triangle(i, i + 1, i + 2);
         mesh.add_triangle(i, i + 2, i + 3);
     };
-    for &(a, b) in segs {
-        quad(a, b, Color32::BLACK);
-        let d = b - a;
-        let len = d.length();
-        if len < 0.5 {
+    for (pts, closed) in paths {
+        let n = pts.len();
+        if n < 2 {
             continue;
         }
-        let dir = d / len;
-        // Dashes are phased by screen position so they line up between
-        // neighbouring segments and crawl over time.
-        let start = (a.x + a.y + phase).rem_euclid(ANT * 2.0);
-        let mut t = -start;
-        while t < len {
-            let s = t.max(0.0);
-            let e = (t + ANT).min(len);
-            if e > s {
-                quad(a + dir * s, a + dir * e, Color32::WHITE);
+        let segs = if *closed { n } else { n - 1 };
+        let mut s = 0.0f32;
+        for i in 0..segs {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            let d = b - a;
+            let len = d.length();
+            if len < 1e-3 {
+                continue;
             }
-            t += ANT * 2.0;
+            if clip.intersects(Rect::from_two_pos(a, b)) {
+                quad(a, b, Color32::BLACK);
+                let dir = d / len;
+                let mut t = -(s - phase).rem_euclid(ANT * 2.0);
+                while t < len {
+                    let (u, v) = (t.max(0.0), (t + ANT).min(len));
+                    if v > u {
+                        quad(a + dir * u, a + dir * v, Color32::WHITE);
+                    }
+                    t += ANT * 2.0;
+                }
+            }
+            s += len;
         }
     }
     painter.add(Shape::mesh(mesh));
+}
+
+/// Makes a closed screen polygon run clockwise (as selection outlines do).
+fn clockwise(mut pts: Vec<Pos2>) -> Vec<Pos2> {
+    let n = pts.len();
+    let area: f32 = (0..n)
+        .map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            a.x * b.y - b.x * a.y
+        })
+        .sum();
+    if area < 0.0 {
+        pts.reverse();
+    }
+    pts
 }
 
 fn handle_box(painter: &egui::Painter, p: Pos2) {
@@ -77,15 +104,15 @@ fn frame_lines(painter: &egui::Painter, s: &[Pos2; 4], col: Color32) {
 }
 
 impl App {
-    fn selection_segments(&mut self) -> Option<Arc<Vec<[f32; 4]>>> {
+    fn selection_contours(&mut self) -> Option<crate::app::Contours> {
         let sel = self.ed.doc.state.selection.clone()?;
         let key = Arc::as_ptr(&sel) as usize;
         match &self.sel_outline {
-            Some((k, segs)) if *k == key => Some(segs.clone()),
+            Some((k, c)) if *k == key => Some(c.clone()),
             _ => {
-                let segs = Arc::new(sel.outline());
-                self.sel_outline = Some((key, segs.clone()));
-                Some(segs)
+                let c = Arc::new(sel.contours());
+                self.sel_outline = Some((key, c.clone()));
+                Some(c)
             }
         }
     }
@@ -143,20 +170,62 @@ impl App {
             );
         }
 
-        // Selection outline.
-        if let Some(segs) = self.selection_segments() {
-            let screen: Vec<(Pos2, Pos2)> = segs
+        // Selection outline. It follows the pixels while they are being
+        // moved or transformed, and the outline itself while dragged with
+        // the select tool.
+        let carried = self
+            .ed
+            .transforming()
+            .filter(|t| t.selection().is_some())
+            .map(|t| t.delta);
+        let shift = match self.gesture {
+            Gesture::MoveSelection { start, end } => {
+                Some(((end.x - start.x).round(), (end.y - start.y).round()))
+            }
+            _ => None,
+        };
+        if let Some(contours) = self.selection_contours() {
+            let n: usize = contours.iter().map(|c| c.len()).sum();
+            let paths: Vec<(Vec<Pos2>, bool)> = contours
                 .iter()
-                .map(|s| (to_s(s[0], s[1]), to_s(s[2], s[3])))
-                .filter(|(a, b)| vp.expand(4.0).intersects(Rect::from_two_pos(*a, *b)))
+                .map(|c| {
+                    let pts = c
+                        .iter()
+                        .map(|&(x, y)| {
+                            let (x, y) = match (carried, shift) {
+                                (Some(m), _) => m.apply(x, y),
+                                (_, Some((dx, dy))) => (x + dx, y + dy),
+                                _ => (x, y),
+                            };
+                            to_s(x, y)
+                        })
+                        .collect();
+                    (pts, true)
+                })
                 .collect();
-            if screen.len() < 60_000 {
-                ants(&painter, &screen, (now * 18.0) as f32);
+            if n < 60_000 {
+                ants(&painter, &paths, (now * 18.0) as f32);
                 ctx.request_repaint_after(std::time::Duration::from_millis(80));
             } else {
-                for (a, b) in screen {
-                    painter.line_segment([a, b], Stroke::new(1.0, Color32::WHITE));
+                for (pts, _) in &paths {
+                    let mut line = pts.clone();
+                    line.push(pts[0]);
+                    painter.add(Shape::line(line, Stroke::new(1.0, Color32::WHITE)));
                 }
+            }
+        }
+        // What is being moved without a selection: a thin frame around it,
+        // so its extent is clear while dragging.
+        if carried.is_none()
+            && !self.shows_handles()
+            && let Some(t) = self.ed.transforming()
+        {
+            let q = handles::screen_quad(&view, vp, ppp, &t.quad());
+            for i in 0..4 {
+                painter.line_segment(
+                    [q[i], q[(i + 1) % 4]],
+                    Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.8)),
+                );
             }
         }
         // Selection being drawn.
@@ -180,10 +249,7 @@ impl App {
                         to_s(a.x, b.y),
                     ]
                 };
-                let segs: Vec<(Pos2, Pos2)> = (0..pts.len())
-                    .map(|i| (pts[i], pts[(i + 1) % pts.len()]))
-                    .collect();
-                ants(&painter, &segs, (now * 18.0) as f32);
+                ants(&painter, &[(clockwise(pts), true)], (now * 18.0) as f32);
                 let (w, h) = ((b.x - a.x).abs().round(), (b.y - a.y).abs().round());
                 if let Some(p) = self.hover {
                     tag(&painter, p + vec2(16.0, 18.0), &format!("{w:.0} × {h:.0}"));
@@ -192,13 +258,26 @@ impl App {
             }
             Gesture::Lasso if self.lasso.len() > 1 => {
                 let pts: Vec<Pos2> = self.lasso.iter().map(|p| to_s(p.x, p.y)).collect();
-                let segs: Vec<(Pos2, Pos2)> = pts.windows(2).map(|w| (w[0], w[1])).collect();
-                ants(&painter, &segs, (now * 18.0) as f32);
+                let (first, last) = (pts[0], *pts.last().unwrap());
+                ants(&painter, &[(pts, false)], (now * 18.0) as f32);
                 painter.line_segment(
-                    [*pts.last().unwrap(), pts[0]],
+                    [last, first],
                     Stroke::new(1.0, Color32::from_white_alpha(90)),
                 );
                 ctx.request_repaint();
+            }
+            Gesture::MoveSelection { start, end } => {
+                if let Some(p) = self.hover {
+                    tag(
+                        &painter,
+                        p + vec2(16.0, 18.0),
+                        &format!(
+                            "{:+.0}, {:+.0}",
+                            (end.x - start.x).round(),
+                            (end.y - start.y).round()
+                        ),
+                    );
+                }
             }
             Gesture::Gradient { start, end } => {
                 let (a, b) = (to_s(start.x, start.y), to_s(end.x, end.y));
@@ -321,6 +400,10 @@ impl App {
                 (Active::Rotate, _) => CursorIcon::AllScroll,
                 (Active::Tool(Tool::Hand), _) => CursorIcon::Grab,
                 (Active::Tool(Tool::Move), _) => CursorIcon::Move,
+                (_, Gesture::MoveSelection { .. }) => CursorIcon::Move,
+                (Active::Tool(Tool::Select), Gesture::None) if over_selection(self, &ctx, vp) => {
+                    CursorIcon::Move
+                }
                 (Active::Tool(Tool::Text), _) => CursorIcon::Text,
                 (Active::Tool(Tool::Brush | Tool::Eraser), _) => CursorIcon::None,
                 (Active::Tool(Tool::Crop), _) if self.crop.is_some() => {
@@ -373,6 +456,19 @@ impl App {
                     );
                     painter.line_segment([p + a, p + b], Stroke::new(1.0, Color32::WHITE));
                 }
+            }
+            let picking_colour = self.prefs.select_shape == SelectShape::Color
+                && active == Active::Tool(Tool::Select)
+                && self.gesture == Gesture::None;
+            if picking_colour
+                && let Some(px) = self
+                    .ed
+                    .sample(view.to_canvas(vp, ppp, p).x, view.to_canvas(vp, ppp, p).y)
+            {
+                // The colour a click would select.
+                let col = Color32::from_rgba_unmultiplied(px[0], px[1], px[2], px[3].max(40));
+                painter.circle_filled(p + vec2(20.0, -20.0), 9.0, col);
+                painter.circle_stroke(p + vec2(20.0, -20.0), 9.0, Stroke::new(2.0, Color32::WHITE));
             }
             if let Active::Tool(Tool::Picker) = active {
                 let c = self.prefs.fg;
@@ -440,8 +536,7 @@ impl App {
             m.apply(0.0, h),
         ];
         let s = handles::screen_quad(&self.view, vp, ppp, &q);
-        let segs: Vec<(Pos2, Pos2)> = (0..4).map(|i| (s[i], s[(i + 1) % 4])).collect();
-        ants(painter, &segs, 0.0);
+        ants(painter, &[(s.to_vec(), true)], 0.0);
         // A blinking caret at the end of the last line hints where typing goes.
         let blink = (ctx.input(|i| i.time) * 2.0) as i64 % 2 == 0;
         if blink && obj.text.is_empty() {
@@ -473,7 +568,9 @@ impl App {
                             .desired_width(268.0)
                             .hint_text("Type your text…"),
                     );
-                    if !r.has_focus() && !r.lost_focus() {
+                    // Take focus back only when nothing else wants it, so a
+                    // tool-bar cell being typed into keeps it.
+                    if !r.has_focus() && !r.lost_focus() && ui.memory(|m| m.focused().is_none()) {
                         r.request_focus();
                     }
                     ui.horizontal(|ui| {
@@ -639,6 +736,19 @@ impl App {
             }
         }
     }
+}
+
+/// Whether the select tool would drag the selection outline from here.
+fn over_selection(app: &App, ctx: &egui::Context, vp: Rect) -> bool {
+    let m = ctx.input(|i| i.modifiers);
+    let (Some(p), Some(sel)) = (app.hover, app.ed.selection()) else {
+        return false;
+    };
+    if m.shift || m.alt {
+        return false;
+    }
+    let c = app.view.to_canvas(vp, ctx.pixels_per_point(), p);
+    sel.value(c.x.floor() as i64, c.y.floor() as i64) >= 128
 }
 
 /// A small dark label.

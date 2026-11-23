@@ -218,6 +218,225 @@ pub enum Scale {
     Log,
 }
 
+/// How a number is shown and typed. Values are stored in their natural
+/// units (opacity 0..=1) but always shown, and typed, in display units
+/// (`mul` × value, e.g. 0..=100 %), so what you type is what you saw.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Fmt {
+    pub mul: f32,
+    pub decimals: usize,
+    /// One more decimal below 10 (brush sizes: "3.5 px", "40 px").
+    pub fine_below_10: bool,
+    pub suffix: &'static str,
+    /// Show a sign and allow typing negative numbers.
+    pub signed: bool,
+}
+
+impl Fmt {
+    pub const fn num(decimals: usize) -> Fmt {
+        Fmt {
+            mul: 1.0,
+            decimals,
+            fine_below_10: false,
+            suffix: "",
+            signed: false,
+        }
+    }
+    pub const fn int() -> Fmt {
+        Fmt::num(0)
+    }
+    pub const fn px() -> Fmt {
+        Fmt::num(0).suffix(" px")
+    }
+    /// 0..=1 shown as 0..=100 %.
+    pub const fn pct() -> Fmt {
+        Fmt::num(0).mul(100.0).suffix("%")
+    }
+    /// -1..=1 shown as −100..=+100.
+    pub const fn signed_pct() -> Fmt {
+        Fmt::num(0).mul(100.0).signed()
+    }
+    pub const fn suffix(mut self, s: &'static str) -> Fmt {
+        self.suffix = s;
+        self
+    }
+    pub const fn mul(mut self, m: f32) -> Fmt {
+        self.mul = m;
+        self
+    }
+    pub const fn signed(mut self) -> Fmt {
+        self.signed = true;
+        self
+    }
+    pub const fn fine(mut self) -> Fmt {
+        self.fine_below_10 = true;
+        self
+    }
+
+    fn decimals_for(&self, shown: f32) -> usize {
+        if self.fine_below_10 && shown.abs() < 9.95 {
+            self.decimals + 1
+        } else {
+            self.decimals
+        }
+    }
+
+    /// The value as displayed, with its unit.
+    pub fn show(&self, v: f32) -> String {
+        let d = v * self.mul;
+        let n = self.decimals_for(d);
+        // Avoid "-0".
+        let d = if d.abs() < 0.5 * 10f32.powi(-(n as i32)) {
+            0.0
+        } else {
+            d
+        };
+        if self.signed {
+            format!("{d:+.n$}{}", self.suffix)
+        } else {
+            format!("{d:.n$}{}", self.suffix)
+        }
+    }
+
+    /// The value as it appears in the box when you start typing.
+    fn edit_text(&self, v: f32) -> String {
+        let d = v * self.mul;
+        let n = self
+            .decimals_for(d)
+            .max(if self.mul == 1.0 { 0 } else { 1 });
+        let s = format!("{d:.n$}");
+        let s = if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s
+        };
+        if s == "-0" { "0".into() } else { s }
+    }
+
+    /// Whether `c` can appear in a typed value.
+    fn allows(&self, c: char, negative_ok: bool) -> bool {
+        c.is_ascii_digit()
+            || (c == '.' && (self.decimals > 0 || self.fine_below_10 || self.mul != 1.0))
+            || ((c == '-' || c == '+') && negative_ok)
+    }
+
+    fn parse(&self, s: &str) -> Option<f32> {
+        let v: f32 = s.trim().parse().ok()?;
+        v.is_finite().then_some(v / self.mul)
+    }
+}
+
+/// Which cell is being typed into. Only one at a time: starting to edit a
+/// cell commits whichever other cell was open.
+fn active_cell_id() -> egui::Id {
+    egui::Id::unique("egaku-active-cell")
+}
+
+#[derive(Clone)]
+struct CellEdit {
+    text: String,
+    /// True on the frame editing started (focus is requested then only).
+    fresh: bool,
+}
+
+/// Starts typing into a cell.
+fn begin_cell(ui: &Ui, id: egui::Id, text: String) {
+    let te = id.with("te");
+    ui.data_mut(|d| {
+        d.insert_temp(id.with("edit"), CellEdit { text, fresh: true });
+        d.insert_temp(active_cell_id(), id);
+    });
+    ui.memory_mut(|m| m.request_focus(te));
+}
+
+/// Shows the text box of a cell being edited. Returns `None` if the cell
+/// isn't being edited, else `Some(Some(v))` when a value was committed and
+/// `Some(None)` while editing continues (or was cancelled).
+///
+/// Enter or clicking away commits; Escape discards. Characters that can't
+/// be part of the value are never inserted.
+fn cell_editor(
+    ui: &mut Ui,
+    id: egui::Id,
+    rect: Rect,
+    fmt: Fmt,
+    min: f32,
+    max: f32,
+) -> Option<Option<f32>> {
+    let edit_id = id.with("edit");
+    let mut e: CellEdit = ui.data(|d| d.get_temp(edit_id))?;
+    let te = id.with("te");
+    let commit = |text: &str| fmt.parse(text).map(|v| v.clamp(min, max));
+    let finish = |ui: &Ui| {
+        ui.data_mut(|d| {
+            d.remove::<CellEdit>(edit_id);
+            if d.get_temp::<egui::Id>(active_cell_id()) == Some(id) {
+                d.remove::<egui::Id>(active_cell_id());
+            }
+        });
+    };
+    // Another cell took over: keep what was typed here.
+    if ui.data(|d| d.get_temp::<egui::Id>(active_cell_id())) != Some(id) {
+        finish(ui);
+        return Some(commit(&e.text));
+    }
+    let focused = ui.memory(|m| m.has_focus(te));
+    let negative_ok = min < 0.0;
+    if focused || e.fresh {
+        ui.input_mut(|i| {
+            i.events.retain_mut(|ev| match ev {
+                egui::Event::Text(t) | egui::Event::Paste(t) => {
+                    t.retain(|c| fmt.allows(c, negative_ok));
+                    !t.is_empty()
+                }
+                _ => true,
+            })
+        });
+    }
+    let r = ui.put(
+        rect,
+        egui::TextEdit::singleline(&mut e.text)
+            .id(te)
+            .char_limit(16)
+            .align(Align2::CENTER_CENTER),
+    );
+    e.text.retain(|c| fmt.allows(c, negative_ok));
+    if e.fresh {
+        // The click that opened the box would otherwise count as a click
+        // elsewhere (the box didn't exist under the pointer yet) and take
+        // the focus straight away again.
+        ui.memory_mut(|m| m.request_focus(te));
+        // Select everything so typing replaces the old value.
+        if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), te) {
+            st.cursor
+                .set_char_range(Some(egui::text_selection::CCursorRange::select_all_str(
+                    &e.text,
+                )));
+            egui::TextEdit::store_state(ui.ctx(), te, st);
+        }
+    }
+    let esc = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    if esc {
+        finish(ui);
+        ui.memory_mut(|m| m.surrender_focus(te));
+        return Some(None);
+    }
+    let enter = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+    if enter || r.lost_focus() || r.clicked_elsewhere() {
+        finish(ui);
+        ui.memory_mut(|m| m.surrender_focus(te));
+        return Some(commit(&e.text));
+    }
+    if !focused && !e.fresh {
+        // Left open while the widget was hidden (tool changed): drop it.
+        finish(ui);
+        return Some(None);
+    }
+    e.fresh = false;
+    ui.data_mut(|d| d.insert_temp(edit_id, e));
+    Some(None)
+}
+
 /// A compact slider: label on the left and value on the right, drawn inside
 /// a bar whose fill shows the value. Drag anywhere to set it; double-click
 /// to type a number.
@@ -229,15 +448,13 @@ pub fn field(
     min: f32,
     max: f32,
     scale: Scale,
-    fmt: &dyn Fn(f32) -> String,
+    fmt: Fmt,
     width: f32,
 ) -> Response {
     let id = ui.scope_id().with(("field", label));
     let (rect, mut resp) = ui.allocate_exact_size(vec2(width, theme::ROW), Sense::click_and_drag());
-    let editing_id = id.with("edit");
-    let mut editing: Option<String> = ui.data(|d| d.get_temp(editing_id));
     if resp.double_clicked() {
-        editing = Some(format!("{}", (*value * 100.0).round() / 100.0));
+        begin_cell(ui, id, fmt.edit_text(*value));
     }
     let to_t = |v: f32| match scale {
         Scale::Linear => (v - min) / (max - min),
@@ -247,31 +464,33 @@ pub fn field(
         Scale::Linear => min + t * (max - min),
         Scale::Log => (min.ln() + t * (max.ln() - min.ln())).exp(),
     };
-    if let Some(mut text) = editing {
-        let r = ui.put(
-            rect,
-            egui::TextEdit::singleline(&mut text).align(Align2::CENTER_CENTER),
-        );
-        r.request_focus();
-        let done = r.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if done {
-            let t = text.trim().trim_end_matches(['%', 'p', 'x', ' ', '°']);
-            if let Ok(v) = t.parse::<f32>() {
-                let pct = fmt(1.0).ends_with('%') && max <= 1.0;
-                let v = if pct { v / 100.0 } else { v };
-                *value = v.clamp(min, max);
-                resp.mark_changed();
-            }
-            ui.data_mut(|d| d.remove::<String>(editing_id));
-        } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            ui.data_mut(|d| d.remove::<String>(editing_id));
-        } else {
-            ui.data_mut(|d| d.insert_temp(editing_id, text));
+    if let Some(done) = cell_editor(ui, id, rect, fmt, min, max) {
+        if let Some(v) = done
+            && v != *value
+        {
+            *value = v;
+            resp.mark_changed();
         }
         return resp;
     }
+    // The first click of a double-click moved the value; put it back, since
+    // the double-click means "let me type it".
+    let undo_id = id.with("before-click");
+    if resp.double_clicked() {
+        if let Some(v) = ui.data(|d| d.get_temp::<f32>(undo_id))
+            && v != *value
+        {
+            *value = v;
+            resp.mark_changed();
+        }
+        return resp;
+    }
+    if resp.clicked() {
+        ui.data_mut(|d| d.insert_temp(undo_id, *value));
+    } else if resp.drag_started() {
+        ui.data_mut(|d| d.remove::<f32>(undo_id));
+    }
     if (resp.dragged() || resp.clicked())
-        && !resp.double_clicked()
         && let Some(p) = resp.interact_pointer_pos()
     {
         // Shift drags finely, relative to where the drag started.
@@ -328,7 +547,7 @@ pub fn field(
     p.text(
         rect.right_center() - vec2(8.0, 0.0),
         Align2::RIGHT_CENTER,
-        fmt(*value),
+        fmt.show(*value),
         egui::FontId::proportional(12.0),
         theme::TEXT,
     );
@@ -337,16 +556,99 @@ pub fn field(
 
 /// A field for a 0..=1 value shown as a percentage.
 pub fn pct(ui: &mut Ui, label: &str, v: &mut f32, width: f32) -> Response {
-    field(
-        ui,
-        label,
-        v,
-        0.0,
-        1.0,
-        Scale::Linear,
-        &|x| format!("{:.0}%", x * 100.0),
-        width,
-    )
+    field(ui, label, v, 0.0, 1.0, Scale::Linear, Fmt::pct(), width)
+}
+
+/// A number box without a bar, for values with a wide range (pixel
+/// dimensions): drag sideways to scrub, click to type.
+pub fn number_box(
+    ui: &mut Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    value: &mut u32,
+    min: u32,
+    max: u32,
+    suffix: &'static str,
+    width: f32,
+) -> Response {
+    let id = ui.scope_id().with(("numbox", id_salt));
+    let fmt = Fmt::int().suffix(suffix);
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(width, theme::ROW), Sense::click_and_drag());
+    if resp.clicked() {
+        begin_cell(ui, id, fmt.edit_text(*value as f32));
+    }
+    if let Some(done) = cell_editor(ui, id, rect, fmt, min as f32, max as f32) {
+        if let Some(v) = done {
+            let v = v.round() as u32;
+            if v != *value {
+                *value = v;
+                resp.mark_changed();
+            }
+        }
+        return resp;
+    }
+    let acc_id = id.with("acc");
+    if resp.dragged() {
+        // Faster the further you go; Shift for single steps.
+        let fine = ui.input(|i| i.modifiers.shift);
+        let mut acc: f32 = ui.data(|d| d.get_temp(acc_id)).unwrap_or(0.0);
+        let dx = resp.drag_delta().x;
+        acc += if fine {
+            dx * 0.25
+        } else {
+            dx * (1.0 + *value as f32 / 200.0)
+        };
+        let step = acc.trunc();
+        if step != 0.0 {
+            let v = (*value as f32 + step).clamp(min as f32, max as f32) as u32;
+            if v != *value {
+                *value = v;
+                resp.mark_changed();
+            }
+            acc -= step;
+        }
+        ui.data_mut(|d| d.insert_temp(acc_id, acc));
+    } else {
+        ui.data_mut(|d| d.remove::<f32>(acc_id));
+    }
+    if resp.hovered() || resp.dragged() {
+        ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+    }
+    let hot = resp.hovered() || resp.dragged();
+    let p = ui.painter();
+    p.rect_filled(
+        rect,
+        6.0,
+        if hot {
+            theme::BG_HOVER
+        } else {
+            theme::BG_RAISED
+        },
+    );
+    p.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        fmt.show(*value as f32),
+        egui::FontId::proportional(12.5),
+        theme::TEXT,
+    );
+    resp
+}
+
+/// Keeps only characters `ok` accepts in text typed into the focused
+/// widget `id`, before the widget sees them.
+pub fn filter_typing(ui: &Ui, id: egui::Id, ok: impl Fn(char) -> bool) {
+    if !ui.memory(|m| m.has_focus(id)) {
+        return;
+    }
+    ui.input_mut(|i| {
+        i.events.retain_mut(|ev| match ev {
+            egui::Event::Text(t) | egui::Event::Paste(t) => {
+                t.retain(&ok);
+                !t.is_empty()
+            }
+            _ => true,
+        })
+    });
 }
 
 /// A panel header with a disclosure triangle; returns whether it's open.

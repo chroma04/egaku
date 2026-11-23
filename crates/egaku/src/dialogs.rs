@@ -10,7 +10,7 @@ use egui_phosphor::regular as ph;
 
 use crate::app::{AnimFormat, App, Modal, NumberOp, Pending};
 use crate::theme;
-use crate::widgets::{self, Scale, field, pct, segmented};
+use crate::widgets::{self, Fmt, Scale, field, pct, segmented};
 
 /// Shows a modal with a title; the body returns `Some(true)` to confirm,
 /// `Some(false)` to cancel and `None` to stay open.
@@ -58,13 +58,7 @@ fn size_row(ui: &mut egui::Ui, label: &str, v: &mut u32) -> bool {
             [56.0, 22.0],
             egui::Label::new(egui::RichText::new(label).color(theme::TEXT_DIM)),
         );
-        ui.add(
-            egui::DragValue::new(v)
-                .range(1..=MAX_CANVAS)
-                .suffix(" px")
-                .speed(4.0),
-        )
-        .changed()
+        widgets::number_box(ui, label, v, 1, MAX_CANVAS, " px", 110.0).changed()
     })
     .inner
 }
@@ -241,16 +235,7 @@ impl App {
                                     egui::RichText::new("Quality").color(theme::TEXT_DIM),
                                 ),
                             );
-                            field(
-                                ui,
-                                "",
-                                &mut v,
-                                1.0,
-                                100.0,
-                                Scale::Linear,
-                                &|v| format!("{v:.0}"),
-                                200.0,
-                            );
+                            field(ui, "", &mut v, 1.0, 100.0, Scale::Linear, Fmt::int(), 200.0);
                         });
                         *q = v.round() as u8;
                     }
@@ -343,7 +328,7 @@ impl App {
                                 1.0,
                                 frames.max(1) as f32,
                                 Scale::Linear,
-                                &|v| format!("{v:.0}"),
+                                Fmt::int(),
                                 200.0,
                             );
                         });
@@ -528,7 +513,7 @@ impl App {
                         0.0,
                         max,
                         Scale::Linear,
-                        &|v| format!("{v:.0} px"),
+                        Fmt::px(),
                         280.0,
                     );
                     buttons(ui, "OK", true)
@@ -830,7 +815,6 @@ impl App {
 /// Sliders for an adjustment's settings.
 fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
     let w = 340.0;
-    let signed = |v: f32| format!("{:+.0}", v * 100.0);
     match a {
         Adjustment::BrightnessContrast {
             brightness,
@@ -843,7 +827,7 @@ fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
                 -1.0,
                 1.0,
                 Scale::Linear,
-                &signed,
+                Fmt::signed_pct(),
                 w,
             );
             field(
@@ -853,7 +837,7 @@ fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
                 -1.0,
                 1.0,
                 Scale::Linear,
-                &signed,
+                Fmt::signed_pct(),
                 w,
             );
         }
@@ -870,7 +854,7 @@ fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
                 -180.0,
                 180.0,
                 Scale::Linear,
-                &|v| format!("{v:+.0}°"),
+                Fmt::int().signed().suffix("°"),
                 w,
             );
             field(
@@ -880,7 +864,7 @@ fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
                 -1.0,
                 1.0,
                 Scale::Linear,
-                &signed,
+                Fmt::signed_pct(),
                 w,
             );
             field(
@@ -890,7 +874,7 @@ fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
                 -1.0,
                 1.0,
                 Scale::Linear,
-                &signed,
+                Fmt::signed_pct(),
                 w,
             );
         }
@@ -909,19 +893,10 @@ fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
                 0.0,
                 0.99,
                 Scale::Linear,
-                &|v| format!("{:.0}", v * 255.0),
+                Fmt::int().mul(255.0),
                 w,
             );
-            field(
-                ui,
-                "Midtones",
-                gamma,
-                0.1,
-                5.0,
-                Scale::Log,
-                &|v| format!("{v:.2}"),
-                w,
-            );
+            field(ui, "Midtones", gamma, 0.1, 5.0, Scale::Log, Fmt::num(2), w);
             field(
                 ui,
                 "Highlights",
@@ -929,7 +904,7 @@ fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
                 0.01,
                 1.0,
                 Scale::Linear,
-                &|v| format!("{:.0}", v * 255.0),
+                Fmt::int().mul(255.0),
                 w,
             );
             *white = white.max(*black + 0.01);
@@ -941,7 +916,7 @@ fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
                 0.0,
                 1.0,
                 Scale::Linear,
-                &|v| format!("{:.0}", v * 255.0),
+                Fmt::int().mul(255.0),
                 w,
             );
             field(
@@ -951,7 +926,7 @@ fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
                 0.0,
                 1.0,
                 Scale::Linear,
-                &|v| format!("{:.0}", v * 255.0),
+                Fmt::int().mul(255.0),
                 w,
             );
         }
@@ -967,12 +942,21 @@ fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
                 -1.0,
                 1.0,
                 Scale::Linear,
-                &signed,
+                Fmt::signed_pct(),
                 w,
             )
             .on_hover_text("Cooler ← → warmer");
-            field(ui, "Tint", tint, -1.0, 1.0, Scale::Linear, &signed, w)
-                .on_hover_text("Green ← → magenta");
+            field(
+                ui,
+                "Tint",
+                tint,
+                -1.0,
+                1.0,
+                Scale::Linear,
+                Fmt::signed_pct(),
+                w,
+            )
+            .on_hover_text("Green ← → magenta");
             field(
                 ui,
                 "Vibrance",
@@ -980,7 +964,7 @@ fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
                 -1.0,
                 1.0,
                 Scale::Linear,
-                &signed,
+                Fmt::signed_pct(),
                 w,
             )
             .on_hover_text("Boosts muted colours more than vivid ones");
@@ -993,7 +977,7 @@ fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
                 0.0,
                 1.0,
                 Scale::Linear,
-                &|v| format!("{:.0}", v * 255.0),
+                Fmt::int().mul(255.0),
                 w,
             );
         }
@@ -1006,7 +990,7 @@ fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
                 2.0,
                 32.0,
                 Scale::Linear,
-                &|v| format!("{v:.0}"),
+                Fmt::int(),
                 w,
             );
             *levels = v.round() as u32;
@@ -1019,7 +1003,7 @@ fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
                 0.5,
                 100.0,
                 Scale::Log,
-                &|v| format!("{v:.1} px"),
+                Fmt::num(1).suffix(" px"),
                 w,
             );
         }
@@ -1032,7 +1016,7 @@ fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
                 0.5,
                 20.0,
                 Scale::Log,
-                &|v| format!("{v:.1} px"),
+                Fmt::num(1).suffix(" px"),
                 w,
             );
         }
@@ -1049,7 +1033,7 @@ fn adjust_controls(ui: &mut egui::Ui, a: &mut Adjustment) {
                 2.0,
                 128.0,
                 Scale::Log,
-                &|v| format!("{v:.0} px"),
+                Fmt::px(),
                 w,
             );
             *size = v.round() as u32;

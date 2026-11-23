@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod brush_editor;
 mod canvas;
 mod color_picker;
 mod dialogs;
@@ -82,6 +83,7 @@ impl eframe::App for app::App {
             self.shortcuts(&ctx, vp);
             self.canvas_ui(ui);
         });
+        self.brush_editor(&ctx);
         self.modals(&ctx);
     }
 
