@@ -1486,17 +1486,15 @@ impl App {
                 } else {
                     egui::FontId::proportional(13.0)
                 };
-                let galley = ui
-                    .painter()
-                    .layout(name.clone(), font, col, name_rect.width());
-                let clipped = ui
-                    .painter()
-                    .with_clip_rect(name_rect.expand2(vec2(0.0, 4.0)));
-                clipped.galley(
-                    pos2(name_rect.left(), name_rect.center().y - 8.0),
-                    galley,
-                    col,
+                // One line, ending in an ellipsis when it doesn't fit.
+                let mut job = egui::text::LayoutJob::single_section(
+                    name.clone(),
+                    egui::TextFormat::simple(font, col),
                 );
+                job.wrap = egui::text::TextWrapping::truncate_at_width(name_rect.width());
+                let galley = ui.painter().layout_job(job);
+                let y = name_rect.center().y - galley.size().y * 0.5;
+                ui.painter().galley(pos2(name_rect.left(), y), galley, col);
             }
             let mut sub = String::new();
             if blend != BlendMode::Normal {
