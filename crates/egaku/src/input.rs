@@ -898,21 +898,27 @@ impl App {
                 .filter_map(|e| match e {
                     egui::Event::Copy => Some(0),
                     egui::Event::Cut => Some(1),
-                    egui::Event::Paste(_) => Some(2),
+                    // Ctrl+V arrives as text or as an image, depending on
+                    // what the system clipboard holds.
+                    egui::Event::Paste(_) | egui::Event::PasteImage(_) => Some(2),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
         });
+        let mut pasted = false;
         for c in clip {
             match c {
                 0 => self.copy(ctx, false, false),
                 1 => self.copy(ctx, false, true),
-                _ => {
-                    if !self.paste_internal() {
-                        self.toast(ctx, "The clipboard has no image", true);
-                    }
+                _ if !pasted => {
+                    pasted = true;
+                    self.paste(ctx);
                 }
+                _ => {}
             }
+        }
+        if sc(cs, Key::V) {
+            self.paste_as_image(ctx);
         }
         if sc(cs, Key::C) {
             self.copy(ctx, true, false);
@@ -1228,7 +1234,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ),
     (
         "Ctrl+C / X / V",
-        "Copy / cut / paste (Ctrl+Shift+C copies merged)",
+        "Copy / cut / paste (Ctrl+Shift+C copies merged, Ctrl+Shift+V pastes as a new image)",
     ),
     (
         "Arrows  ·  Shift+Arrows",

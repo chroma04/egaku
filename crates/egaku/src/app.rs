@@ -217,6 +217,8 @@ pub struct App {
     /// Playback start time and frame.
     pub playing: Option<(f64, usize)>,
     pub clipboard: Option<Copied>,
+    /// The system clipboard, opened on first paste.
+    pub system_clipboard: Option<arboard::Clipboard>,
     /// Selection mode chosen in the tool options; modifier keys override it.
     pub select_mode: egaku_core::selection::SelectOp,
     /// The mode in effect for the current selection drag.
@@ -285,6 +287,7 @@ impl App {
             text_edit: None,
             playing: None,
             clipboard: None,
+            system_clipboard: None,
             select_mode: Default::default(),
             press_op: Default::default(),
             fonts: None,
@@ -817,18 +820,66 @@ impl App {
         });
     }
 
-    /// Pastes a clipboard image as a new image layer.
-    pub fn paste_image(&mut self, img: &egui::ColorImage) {
-        let [w, h] = img.size;
-        // Clipboard images are premultiplied; the importer wants straight alpha.
-        let rgba: Vec<u8> = img
-            .pixels
-            .iter()
-            .flat_map(|c| egaku_core::color::unpremultiply(c.to_array()))
-            .collect();
-        let src = Source::from_rgba(w as u32, h as u32, &rgba);
-        self.ed.place_image("Pasted image", src, None);
+    /// Places straight-alpha pixels as a new image layer centred at `at`
+    /// (the canvas centre if `None`).
+    fn place_pasted(&mut self, w: u32, h: u32, rgba: &[u8], at: Option<(f32, f32)>) {
+        let src = Source::from_rgba(w, h, rgba);
+        self.ed.place_image("Pasted image", src, at);
         self.set_tool(Tool::Move);
+    }
+
+    /// The image on the system clipboard, as straight-alpha RGBA.
+    fn system_image(&mut self) -> Option<(u32, u32, Vec<u8>)> {
+        if self.system_clipboard.is_none() {
+            self.system_clipboard = arboard::Clipboard::new().ok();
+        }
+        let img = self.system_clipboard.as_mut()?.get_image().ok()?;
+        let (w, h) = (img.width as u32, img.height as u32);
+        (w > 0 && h > 0 && img.bytes.len() == w as usize * h as usize * 4)
+            .then(|| (w, h, img.bytes.into_owned()))
+    }
+
+    /// Paste (Ctrl+V). The app's own copy pastes in place as pixels, as long
+    /// as the system clipboard still holds it; an image copied elsewhere
+    /// since is placed as a new image layer.
+    pub fn paste(&mut self, ctx: &egui::Context) {
+        let sys = self.system_image();
+        let ours = match (&sys, &self.clipboard) {
+            (Some((w, h, px)), Some(c)) => same_image(c, *w, *h, px),
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if ours {
+            self.paste_internal();
+        } else if let Some((w, h, px)) = sys {
+            self.place_pasted(w, h, &px, None);
+        } else {
+            self.toast(ctx, "The clipboard has no image", true);
+        }
+    }
+
+    /// Paste as New Image (Ctrl+Shift+V): whatever the clipboard holds
+    /// becomes an image layer, which can be scaled without loss.
+    pub fn paste_as_image(&mut self, ctx: &egui::Context) {
+        let sys = self.system_image();
+        let ours = match (&sys, &self.clipboard) {
+            (Some((w, h, px)), Some(c)) => same_image(c, *w, *h, px),
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if ours && let Some(c) = self.clipboard.take() {
+            // Our own copy keeps its place on the canvas.
+            let at = (
+                c.x as f32 + c.width as f32 * 0.5,
+                c.y as f32 + c.height as f32 * 0.5,
+            );
+            self.place_pasted(c.width, c.height, &c.rgba, Some(at));
+            self.clipboard = Some(c);
+        } else if let Some((w, h, px)) = sys {
+            self.place_pasted(w, h, &px, None);
+        } else {
+            self.toast(ctx, "The clipboard has no image", true);
+        }
     }
 
     pub fn save(&mut self, ctx: &egui::Context) {
@@ -974,23 +1025,7 @@ impl App {
     }
 
     pub fn handle_dropped_and_pasted(&mut self, ctx: &egui::Context) {
-        let (dropped, pasted) = ctx.input(|i| {
-            let pasted: Vec<Arc<egui::ColorImage>> = i
-                .events
-                .iter()
-                .filter_map(|e| {
-                    if let egui::Event::PasteImage(img) = e {
-                        Some(img.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            (i.raw.dropped_files.clone(), pasted)
-        });
-        for img in pasted {
-            self.paste_image(&img);
-        }
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for f in dropped {
             let p = f.path().to_path_buf();
             if p.as_os_str().is_empty() {
@@ -1127,4 +1162,59 @@ pub fn consume_exact(i: &mut egui::InputState, m: egui::Modifiers, k: egui::Key)
         true
     });
     hit
+}
+
+/// Whether the system clipboard's image is the one this app copied. The
+/// round trip through the platform can nudge colours (premultiplication,
+/// colour management) and drop alpha, so this compares the size and the
+/// colour of opaque pixels, loosely.
+fn same_image(c: &Copied, w: u32, h: u32, px: &[u8]) -> bool {
+    if c.width != w || c.height != h || c.rgba.len() != px.len() {
+        return false;
+    }
+    let n = (w as usize) * (h as usize);
+    let step = (n / 65_536).max(1);
+    let (mut diff, mut count) = (0u64, 0u64);
+    for i in (0..n).step_by(step) {
+        let (a, b) = (&c.rgba[i * 4..i * 4 + 4], &px[i * 4..i * 4 + 4]);
+        if a[3] < 250 {
+            continue;
+        }
+        for ch in 0..3 {
+            diff += (a[ch] as i32 - b[ch] as i32).unsigned_abs() as u64;
+        }
+        count += 3;
+    }
+    count == 0 || diff <= count * 6
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognises_own_copy_after_a_lossy_round_trip() {
+        let rgba: Vec<u8> = (0..16 * 8 * 4)
+            .map(|i| if i % 4 == 3 { 255 } else { (i * 7 % 256) as u8 })
+            .collect();
+        let c = Copied {
+            x: 3,
+            y: 4,
+            width: 16,
+            height: 8,
+            rgba: rgba.clone(),
+        };
+        assert!(same_image(&c, 16, 8, &rgba));
+        // Off by one or two, as premultiplication or colour management may do.
+        let nudged: Vec<u8> = rgba
+            .iter()
+            .enumerate()
+            .map(|(i, v)| if i % 4 == 3 { *v } else { v.saturating_add(2) })
+            .collect();
+        assert!(same_image(&c, 16, 8, &nudged));
+        // Another image of the same size, and one of another size.
+        let other: Vec<u8> = rgba.iter().map(|v| v.wrapping_add(90)).collect();
+        assert!(!same_image(&c, 16, 8, &other));
+        assert!(!same_image(&c, 8, 16, &rgba));
+    }
 }
