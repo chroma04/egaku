@@ -69,9 +69,11 @@ impl TipImage {
     /// (so the tip sits centred under the cursor) and scaled to fit
     /// [`MAX_TIP`].
     pub fn from_rgba(width: u32, height: u32, rgba: &[u8]) -> Option<Self> {
-        let has_alpha = rgba.chunks_exact(4).any(|p| p[3] < 250);
+        let has_alpha = rgba.as_chunks::<4>().0.iter().any(|p| p[3] < 250);
         let cov: Vec<u8> = rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| {
                 if has_alpha {
                     p[3]
