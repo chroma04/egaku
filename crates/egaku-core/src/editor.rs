@@ -1168,6 +1168,11 @@ impl Editor {
         let old = t.dest_rect(cols, rows);
         t.delta = delta;
         t.smooth = smooth;
+        // Build any mip levels now, before the projection renders the
+        // transformed tiles in parallel.
+        for p in &t.parts {
+            p.src.prepare(&delta.compose(p.src_m), smooth);
+        }
         let new = t.dest_rect(cols, rows);
         self.projection.invalidate_rect(old);
         self.projection.invalidate_rect(new);

@@ -230,15 +230,14 @@ impl App {
                     (pts, true)
                 })
                 .collect();
+            // Very busy outlines (colour selections on photos) are too
+            // costly to animate, so their ants hold still. They must stay
+            // two-tone: a plain white line vanishes over light images.
             if n < 60_000 {
                 ants(&painter, &paths, (now * 18.0) as f32);
                 ctx.request_repaint_after(std::time::Duration::from_millis(80));
             } else {
-                for (pts, _) in &paths {
-                    let mut line = pts.clone();
-                    line.push(pts[0]);
-                    painter.add(Shape::line(line, Stroke::new(1.0, Color32::WHITE)));
-                }
+                ants(&painter, &paths, 0.0);
             }
         }
         // What is being moved without a selection: a thin frame around it,

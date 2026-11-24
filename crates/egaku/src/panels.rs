@@ -186,8 +186,11 @@ impl App {
         if menu_item(ui, "Copy Merged", "Ctrl+Shift+C", true) {
             self.copy(ctx, true, false);
         }
-        if menu_item(ui, "Paste", "Ctrl+V", self.clipboard.is_some()) {
-            self.paste_internal();
+        if menu_item(ui, "Paste", "Ctrl+V", true) {
+            self.paste(ctx);
+        }
+        if menu_item(ui, "Paste as New Image", "Ctrl+Shift+V", true) {
+            self.paste_as_image(ctx);
         }
         ui.separator();
         if menu_item(ui, "Clear", "Del", true)
