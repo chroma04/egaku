@@ -596,43 +596,28 @@ impl App {
             });
         }
         let b = self.current_brush_mut();
-        if b.pixel {
-            field(
-                ui,
-                "Size",
-                &mut b.size,
-                1.0,
-                64.0,
-                Scale::Linear,
-                Fmt::px(),
-                120.0,
-            );
-            b.size = b.size.round().max(1.0);
-        } else {
-            field(
-                ui,
-                "Size",
-                &mut b.size,
-                1.0,
-                1000.0,
-                Scale::Log,
-                Fmt::px().fine(),
-                130.0,
-            );
-        }
+        field(
+            ui,
+            "Size",
+            &mut b.size,
+            1.0,
+            1000.0,
+            Scale::Log,
+            Fmt::px().fine(),
+            130.0,
+        );
         pct(ui, "Opacity", &mut b.opacity, 120.0);
-        if !b.pixel {
-            pct(ui, "Flow", &mut b.flow, 100.0);
-            pct(ui, "Hardness", &mut b.hardness, 120.0);
-        }
+        pct(ui, "Flow", &mut b.flow, 100.0);
+        pct(ui, "Hardness", &mut b.hardness, 120.0);
         pct(ui, "Stabilizer", &mut b.smoothing, 124.0)
             .on_hover_text("Smooths the stroke behind the pen");
+        crate::brush_editor::tip_picker(ui, b, true);
         toggle(
             ui,
             &mut b.pixel,
             ph::GRID_FOUR,
             "Pixel",
-            "Pixel-art mode: hard, aliased pixels with no gaps",
+            crate::brush_editor::PIXEL_HELP,
         );
         let open = self.prefs.brush_editor;
         if icon_button(
@@ -1293,18 +1278,25 @@ impl App {
             let w = ui.available_width();
             egui::ComboBox::from_id_salt("blend")
                 .width(w - 64.0 - 112.0)
+                .height(720.0)
                 .selected_text(blend.name())
                 .show_ui(ui, |ui| {
-                    for (i, m) in BlendMode::ALL.into_iter().enumerate() {
-                        if [1, 5, 8].contains(&i) {
+                    for m in BlendMode::ALL {
+                        if m == BlendMode::PassThrough && kind != Kind::Group {
+                            continue;
+                        }
+                        if m.starts_group() {
                             ui.separator();
                         }
-                        ui.selectable_value(&mut blend, m, m.name());
+                        ui.selectable_value(&mut blend, m, m.name())
+                            .on_hover_text(blend_blurb(m));
                     }
-                });
+                })
+                .response
+                .on_hover_text("Blend mode (Shift+Plus / Shift+Minus to step through)");
             let ids = self.ed.selected_layers();
             if blend != self.ed.doc.active_layer().blend {
-                self.ed.set_layers(&ids, "Blend mode", |l| l.blend = blend);
+                self.set_blend(&ids, blend);
             }
             let r = pct(ui, "", &mut opacity, 108.0).on_hover_text(if ids.len() > 1 {
                 "Opacity of the selected layers"
@@ -1590,7 +1582,7 @@ impl App {
                 ui.painter().galley(pos2(name_rect.left(), y), galley, col);
             }
             let mut sub = String::new();
-            if blend != BlendMode::Normal {
+            if !matches!(blend, BlendMode::Normal | BlendMode::PassThrough) {
                 sub += blend.name();
             }
             if opacity < 0.999 {
@@ -1963,7 +1955,7 @@ pub fn stroke_preview(p: &egaku_core::brush::BrushParams) -> egui::ColorImage {
     let (w, h) = (256u32, 64u32);
     let mut params = *p;
     params.size = if p.pixel {
-        4.0
+        p.size.clamp(1.0, 8.0)
     } else {
         p.size.clamp(2.0, 22.0)
     };
@@ -2000,4 +1992,39 @@ pub fn stroke_preview(p: &egaku_core::brush::BrushParams) -> egui::ColorImage {
         }
     }
     egui::ColorImage::new([w as usize, h as usize], px)
+}
+
+/// What a blend mode does, in a sentence, for tooltips.
+fn blend_blurb(m: BlendMode) -> &'static str {
+    use BlendMode::*;
+    match m {
+        Normal => "Covers what's below",
+        Dissolve => "Speckles: each pixel is drawn or not, at random, by its opacity",
+        Darken => "Keeps the darker of the two, channel by channel",
+        Multiply => "Darkens like layered ink; white disappears",
+        ColorBurn => "Darkens with more contrast and saturation",
+        LinearBurn => "Darkens by subtracting brightness; deeper than Multiply",
+        DarkerColor => "Keeps whichever whole colour is darker",
+        Lighten => "Keeps the lighter of the two, channel by channel",
+        Screen => "Lightens like projected light; black disappears",
+        ColorDodge => "Brightens with more contrast, for glows",
+        Add => "Adds brightness; strong glows and light",
+        LighterColor => "Keeps whichever whole colour is lighter",
+        Overlay => "Multiplies darks and screens lights of what's below",
+        SoftLight => "A gentle Overlay, like a diffuse spotlight",
+        HardLight => "Overlay driven by this layer: a harsh spotlight",
+        VividLight => "Burns or dodges by this layer's brightness",
+        LinearLight => "Darkens or lightens by this layer's brightness",
+        PinLight => "Replaces darks or lights depending on this layer",
+        HardMix => "Posterizes each channel to full on or off",
+        Difference => "Subtracts the darker from the lighter; same colours turn black",
+        Exclusion => "A softer, lower-contrast Difference",
+        Subtract => "Subtracts this layer from what's below",
+        Divide => "Divides what's below by this layer; white disappears",
+        Hue => "Takes this layer's hue, keeping the saturation and brightness below",
+        Saturation => "Takes this layer's saturation",
+        Color => "Takes this layer's hue and saturation: for tinting",
+        Luminosity => "Takes this layer's brightness",
+        PassThrough => "The group's layers blend with everything below, as if ungrouped",
+    }
 }

@@ -13,9 +13,12 @@
 //! layer itself is touched exactly once per stroke, which also makes the
 //! stroke a single, cheap undo step.
 
+use std::sync::Arc;
+
 use rayon::prelude::*;
 
 use crate::tile::{TILE, TILE_PX, Tile, TileCoord, TileRect, tiles_for};
+use crate::tip::TipImage;
 
 /// Coverage values for one tile, `0..=65535`.
 #[derive(Clone)]
@@ -78,16 +81,13 @@ impl Mask {
 
     /// Stamps one dab, appending the tiles it touched to `dirty`.
     pub fn stamp(&mut self, dab: &Dab, dirty: &mut Vec<TileCoord>) {
-        if dab.pixel {
-            self.stamp_pixel(dab, dirty);
-            return;
-        }
-        let r = dab.radius.max(0.5);
+        let shape = DabShape::new(dab);
+        let r = shape.extent;
         let (w, h) = (self.width as f32, self.height as f32);
-        let x0 = (dab.x - r - 1.0).floor().max(0.0);
-        let y0 = (dab.y - r - 1.0).floor().max(0.0);
-        let x1 = (dab.x + r + 1.0).ceil().min(w);
-        let y1 = (dab.y + r + 1.0).ceil().min(h);
+        let x0 = (shape.x - r - 1.0).floor().max(0.0);
+        let y0 = (shape.y - r - 1.0).floor().max(0.0);
+        let x1 = (shape.x + r + 1.0).ceil().min(w);
+        let y1 = (shape.y + r + 1.0).ceil().min(h);
         if x0 >= x1 || y0 >= y1 || dab.flow <= 0.0 || dab.cap <= 0.0 {
             return;
         }
@@ -104,7 +104,6 @@ impl Mask {
             self.tile_mut(c);
             dirty.push(c);
         }
-        let shape = DabShape::new(dab);
         let cols = self.cols as usize;
         let (x0, x1) = (rect.x0 as usize, rect.x1 as usize);
         // Borrow just the rows of the grid the dab covers.
@@ -128,26 +127,6 @@ impl Mask {
         } else {
             jobs.iter_mut()
                 .for_each(|(c, t)| shape.stamp_tile(*c, px, t));
-        }
-    }
-
-    /// Stamps an aliased square of whole pixels centred on the dab.
-    fn stamp_pixel(&mut self, dab: &Dab, dirty: &mut Vec<TileCoord>) {
-        let side = (dab.radius * 2.0).round().max(1.0) as i64;
-        let x0 = (dab.x - side as f32 * 0.5 + 0.5).floor() as i64;
-        let y0 = (dab.y - side as f32 * 0.5 + 0.5).floor() as i64;
-        let cap = (dab.cap.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
-        let (w, h) = (self.width as i64, self.height as i64);
-        for y in y0.max(0)..(y0 + side).min(h) {
-            for x in x0.max(0)..(x0 + side).min(w) {
-                let c = TileCoord::new((x / TILE as i64) as u32, (y / TILE as i64) as u32);
-                let t = self.tile_mut(c);
-                let v = &mut t.v[(y as usize % TILE) * TILE + x as usize % TILE];
-                *v = (*v).max(cap);
-                if dirty.last() != Some(&c) {
-                    dirty.push(c);
-                }
-            }
         }
     }
 
@@ -193,7 +172,21 @@ impl Mask {
     }
 }
 
-/// A single brush imprint: a round or elliptical tip.
+/// The outline of a brush tip.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TipShape {
+    /// A circle, or an ellipse with roundness below 1.
+    #[default]
+    Round,
+    /// A square, or a rectangle with roundness below 1.
+    Square,
+    /// A registered image (see [`crate::tip`]), by id. Falls back to round
+    /// if the image isn't registered.
+    Image(u64),
+}
+
+/// A single brush imprint.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Dab {
     pub x: f32,
@@ -206,8 +199,11 @@ pub struct Dab {
     pub flow: f32,
     /// Maximum coverage for this dab, 0..=1.
     pub cap: f32,
-    /// Aliased square covering whole pixels (pixel-art mode).
+    /// Aliased: every pixel is either inside the tip or not, and the tip is
+    /// centred on the pixel grid (pixel-art mode). Falloff, grain and
+    /// image tips still give partial coverage inside it.
     pub pixel: bool,
+    pub tip: TipShape,
     /// Short axis over long axis, 0..=1 (1 = round).
     pub roundness: f32,
     /// Rotation of the long axis, radians.
@@ -228,11 +224,53 @@ impl Default for Dab {
             flow: 1.0,
             cap: 1.0,
             pixel: false,
+            tip: TipShape::Round,
             roundness: 1.0,
             angle: 0.0,
             grain: 0.0,
             grain_scale: 6.0,
         }
+    }
+}
+
+/// Where an aliased dab of `radius` centred near `(x, y)` actually sits:
+/// on a pixel centre when its width in pixels is odd, on a pixel corner
+/// when even, so the stamped shape is symmetric.
+pub fn snap_center(x: f32, y: f32, radius: f32) -> (f32, f32) {
+    let side = (radius * 2.0).round().max(1.0) as i64;
+    if side % 2 == 1 {
+        (x.floor() + 0.5, y.floor() + 0.5)
+    } else {
+        (x.round(), y.round())
+    }
+}
+
+impl Dab {
+    /// The pixels this dab covers, as `(x0, y0, width, height, covered)`
+    /// with rows of `width` flags. For outlining aliased brushes.
+    pub fn footprint(&self) -> (i64, i64, u32, u32, Vec<bool>) {
+        let shape = DabShape::new(self);
+        let e = shape.extent + 1.0;
+        let x0 = (shape.x - e).floor() as i64;
+        let y0 = (shape.y - e).floor() as i64;
+        let w = ((shape.x + e).ceil() as i64 - x0).max(1) as u32;
+        let h = ((shape.y + e).ceil() as i64 - y0).max(1) as u32;
+        let mut m = Mask::new(w, h);
+        let d = Dab {
+            x: self.x - x0 as f32,
+            y: self.y - y0 as f32,
+            flow: 1.0,
+            cap: 1.0,
+            grain: 0.0,
+            ..*self
+        };
+        let mut dirty = vec![];
+        m.stamp(&d, &mut dirty);
+        let cov = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .map(|(x, y)| m.value(x, y) > 0)
+            .collect();
+        (x0, y0, w, h, cov)
     }
 }
 
@@ -264,16 +302,26 @@ fn grain_at(x: f32, y: f32, scale: f32) -> f32 {
     ((n - 0.5) * 1.8 + 0.5).clamp(0.0, 1.0)
 }
 
+enum Kind {
+    Round,
+    Square,
+    Image(Arc<TipImage>),
+}
+
 struct DabShape {
     x: f32,
     y: f32,
     r: f32,
+    /// Half-size of the box that holds the whole tip.
+    extent: f32,
     inner: f32,
     inv_soft: f32,
     flow: f32,
     cap: u32,
-    /// Elliptical tips: cos/sin of the angle and 1 / roundness.
-    ellipse: Option<(f32, f32, f32)>,
+    aliased: bool,
+    kind: Kind,
+    /// Cos/sin of the angle and 1 / roundness.
+    frame: (f32, f32, f32),
     grain: f32,
     grain_scale: f32,
 }
@@ -281,12 +329,27 @@ struct DabShape {
 impl DabShape {
     fn new(d: &Dab) -> Self {
         let r = d.radius.max(0.5);
+        let (x, y) = if d.pixel {
+            snap_center(d.x, d.y, r)
+        } else {
+            (d.x, d.y)
+        };
         let inner = r * d.hardness.clamp(0.0, 1.0);
         let round = d.roundness.clamp(0.02, 1.0);
+        let kind = match d.tip {
+            TipShape::Round => Kind::Round,
+            TipShape::Square => Kind::Square,
+            TipShape::Image(id) => crate::tip::get(id).map_or(Kind::Round, Kind::Image),
+        };
+        let extent = match kind {
+            Kind::Round => r,
+            _ => r * std::f32::consts::SQRT_2,
+        };
         DabShape {
-            x: d.x,
-            y: d.y,
+            x,
+            y,
             r,
+            extent,
             inner,
             inv_soft: if r - inner > 1e-4 {
                 1.0 / (r - inner)
@@ -295,14 +358,20 @@ impl DabShape {
             },
             flow: d.flow.clamp(0.0, 1.0),
             cap: (d.cap.clamp(0.0, 1.0) * 65535.0 + 0.5) as u32,
-            ellipse: (round < 0.999).then(|| (d.angle.cos(), d.angle.sin(), 1.0 / round)),
+            aliased: d.pixel,
+            kind,
+            frame: (d.angle.cos(), d.angle.sin(), 1.0 / round),
             grain: d.grain.clamp(0.0, 1.0),
             grain_scale: d.grain_scale,
         }
     }
 
     fn stamp_tile(&self, c: TileCoord, px: [u32; 4], m: &mut MaskTile) {
-        if self.ellipse.is_some() || self.grain > 0.0 {
+        let simple = matches!(self.kind, Kind::Round)
+            && !self.aliased
+            && self.frame.2 <= 1.001
+            && self.grain <= 0.0;
+        if !simple {
             self.stamp_tile_general(c, px, m);
             return;
         }
@@ -340,7 +409,71 @@ impl DabShape {
         }
     }
 
-    /// Elliptical and/or textured tips.
+    /// How much of the pixel centred at `(dx, dy)` from the dab's centre the
+    /// tip covers, before flow and grain: 0..=1.
+    #[inline]
+    fn coverage(&self, dx: f32, dy: f32) -> f32 {
+        let (ca, sa, k) = self.frame;
+        // Into the tip's frame, short axis stretched to the long one.
+        let u = dx * ca + dy * sa;
+        let w = (-dx * sa + dy * ca) * k;
+        let falloff = |d: f32| {
+            let s = (1.0 - (d - self.inner) * self.inv_soft).clamp(0.0, 1.0);
+            s * s * (3.0 - 2.0 * s)
+        };
+        match &self.kind {
+            Kind::Round => {
+                let d = (u * u + w * w).sqrt();
+                let edge = if self.aliased {
+                    if d < self.r { 1.0 } else { 0.0 }
+                } else {
+                    // Distance to the edge in screen pixels, for antialiasing.
+                    let g = if d > 1e-4 {
+                        ((u / d).powi(2) + (w * k / d).powi(2)).sqrt().max(1e-3)
+                    } else {
+                        1.0
+                    };
+                    ((self.r - d) / g + 0.5).clamp(0.0, 1.0)
+                };
+                if edge <= 0.0 {
+                    0.0
+                } else {
+                    edge.min(falloff(d))
+                }
+            }
+            Kind::Square => {
+                let (au, aw) = (u.abs(), w.abs());
+                let d = au.max(aw);
+                let edge = if self.aliased {
+                    if d < self.r { 1.0 } else { 0.0 }
+                } else {
+                    // Each pair of sides is a straight edge; `w` is stretched
+                    // by `k`, so its distance shrinks back by it.
+                    let eu = (self.r - au + 0.5).clamp(0.0, 1.0);
+                    let ew = ((self.r - aw) / k + 0.5).clamp(0.0, 1.0);
+                    eu.min(ew)
+                };
+                if edge <= 0.0 {
+                    0.0
+                } else {
+                    edge.min(falloff(d))
+                }
+            }
+            Kind::Image(img) => {
+                // The image's longer side spans the tip's diameter.
+                let (iw, ih) = (img.width() as f32, img.height() as f32);
+                let step = iw.max(ih) / (2.0 * self.r);
+                img.sample(
+                    u * step + iw * 0.5,
+                    w * step + ih * 0.5,
+                    step * k.sqrt(),
+                    !self.aliased,
+                )
+            }
+        }
+    }
+
+    /// Shaped, aliased, image and/or textured tips.
     fn stamp_tile_general(&self, c: TileCoord, px: [u32; 4], m: &mut MaskTile) {
         let t = TILE as u32;
         let (bx, by) = (c.x * t, c.y * t);
@@ -348,30 +481,17 @@ impl DabShape {
         let ly0 = px[1].saturating_sub(by).min(t) as usize;
         let lx1 = (px[2].saturating_sub(bx)).min(t) as usize;
         let ly1 = (px[3].saturating_sub(by)).min(t) as usize;
-        let (ca, sa, k) = self.ellipse.unwrap_or((1.0, 0.0, 1.0));
         for ly in ly0..ly1 {
             let py = (by as usize + ly) as f32 + 0.5;
             let dy = py - self.y;
             let row = &mut m.v[ly * TILE..ly * TILE + TILE];
             for (lx, v) in row.iter_mut().enumerate().take(lx1).skip(lx0) {
                 let pxx = (bx as usize + lx) as f32 + 0.5;
-                let dx = pxx - self.x;
-                // Into the tip's frame, short axis stretched to a circle.
-                let u = dx * ca + dy * sa;
-                let w = (-dx * sa + dy * ca) * k;
-                let d = (u * u + w * w).sqrt();
-                // Distance to the edge in screen pixels, for antialiasing.
-                let g = if d > 1e-4 {
-                    ((u / d).powi(2) + (w * k / d).powi(2)).sqrt().max(1e-3)
-                } else {
-                    1.0
-                };
-                let edge = ((self.r - d) / g + 0.5).clamp(0.0, 1.0);
-                if edge <= 0.0 {
+                let cov = self.coverage(pxx - self.x, dy);
+                if cov <= 0.0 {
                     continue;
                 }
-                let s = (1.0 - (d - self.inner) * self.inv_soft).clamp(0.0, 1.0);
-                let f = edge.min(s * s * (3.0 - 2.0 * s)) * self.flow;
+                let f = cov * self.flow;
                 let mut cap = self.cap as f32;
                 if self.grain > 0.0 {
                     // The grain lowers how much paint a spot can ever hold, so
@@ -487,10 +607,14 @@ pub struct BrushParams {
     pub min_size: f32,
     /// Stabiliser strength, 0..=1.
     pub smoothing: f32,
-    /// Pixel-art mode: aliased square dabs on whole pixels, no gaps.
+    /// Pixel-art mode: no antialiasing. Each pixel is either inside the tip
+    /// or not, dabs sit on the pixel grid and lines have no gaps; every
+    /// other setting still applies.
     pub pixel: bool,
     /// In pixel mode, removes the doubled corner pixels of 1px lines.
     pub pixel_perfect: bool,
+    /// The tip's outline.
+    pub tip: TipShape,
     /// Tip shape: short axis over long axis (1 = round).
     pub roundness: f32,
     /// Tip angle in degrees (relative to the stroke when following it).
@@ -611,6 +735,7 @@ impl Default for BrushParams {
             smoothing: 0.3,
             pixel: false,
             pixel_perfect: true,
+            tip: TipShape::Round,
             roundness: 1.0,
             angle: 0.0,
             follow_direction: false,
@@ -650,7 +775,7 @@ pub struct StrokeEngine {
     rng: u32,
     /// Pixel mode: last emitted pixel and pixels held back for the
     /// pixel-perfect corner test.
-    last_px: Option<(i64, i64)>,
+    last_px: Option<[i64; 5]>,
     held: Vec<Dab>,
 }
 
@@ -694,7 +819,7 @@ impl StrokeEngine {
             1.0
         };
         scale *= q.v;
-        if p.taper > 0.5 && !p.pixel {
+        if p.taper > 0.5 {
             let t = (dist / p.taper).clamp(0.0, 1.0);
             scale *= 0.08 + 0.92 * t * (2.0 - t);
         }
@@ -710,9 +835,7 @@ impl StrokeEngine {
         } else {
             p.opacity
         };
-        let mut flow = if p.pixel {
-            1.0
-        } else if p.pressure_flow {
+        let mut flow = if p.pressure_flow {
             p.flow * (0.1 + 0.9 * pr)
         } else {
             p.flow
@@ -722,23 +845,21 @@ impl StrokeEngine {
         if p.follow_direction {
             angle += heading;
         }
-        if !p.pixel {
-            if p.size_jitter > 0.0 {
-                scale *= 1.0 - p.size_jitter * 0.5 * (self.rand() + 1.0) * 0.9;
-            }
-            if p.angle_jitter > 0.0 {
-                angle += self.rand() * p.angle_jitter * std::f32::consts::PI;
-            }
-            if p.opacity_jitter > 0.0 {
-                let j = 1.0 - p.opacity_jitter * 0.5 * (self.rand() + 1.0);
-                cap *= j;
-                flow *= j;
-            }
-            if p.scatter > 0.0 {
-                let r = p.size * scale * p.scatter;
-                x += self.rand() * r;
-                y += self.rand() * r;
-            }
+        if p.size_jitter > 0.0 {
+            scale *= 1.0 - p.size_jitter * 0.5 * (self.rand() + 1.0) * 0.9;
+        }
+        if p.angle_jitter > 0.0 {
+            angle += self.rand() * p.angle_jitter * std::f32::consts::PI;
+        }
+        if p.opacity_jitter > 0.0 {
+            let j = 1.0 - p.opacity_jitter * 0.5 * (self.rand() + 1.0);
+            cap *= j;
+            flow *= j;
+        }
+        if p.scatter > 0.0 {
+            let r = p.size * scale * p.scatter;
+            x += self.rand() * r;
+            y += self.rand() * r;
         }
         Dab {
             x,
@@ -748,26 +869,38 @@ impl StrokeEngine {
             flow,
             cap,
             pixel: p.pixel,
-            roundness: if p.pixel { 1.0 } else { p.roundness },
+            tip: p.tip,
+            roundness: p.roundness,
             angle,
-            grain: if p.pixel { 0.0 } else { p.grain },
+            grain: p.grain,
             grain_scale: p.grain_scale,
         }
     }
 
-    /// Emits a pixel-mode dab, skipping repeats and (for 1px brushes with
-    /// pixel-perfect on) the middle pixel of L-shaped corners.
-    fn emit(&mut self, d: Dab, out: &mut Vec<Dab>) {
+    /// Emits a pixel-mode dab, skipping repeats of the same footprint and
+    /// (for 1px brushes with pixel-perfect on) the middle pixel of L-shaped
+    /// corners.
+    fn emit(&mut self, mut d: Dab, out: &mut Vec<Dab>) {
         if !d.pixel {
             out.push(d);
             return;
         }
-        let key = (d.x.floor() as i64, d.y.floor() as i64);
+        (d.x, d.y) = snap_center(d.x, d.y, d.radius.max(0.5));
+        let q = |v: f32, k: f32| (v * k).round() as i64;
+        let key = [
+            q(d.x, 2.0),
+            q(d.y, 2.0),
+            q(d.radius, 8.0),
+            q(d.angle, 128.0),
+            q(d.cap, 256.0),
+        ];
         if self.last_px == Some(key) {
             return;
         }
         self.last_px = Some(key);
-        let perfect = self.params.pixel_perfect && (d.radius * 2.0).round() <= 1.0;
+        let perfect = self.params.pixel_perfect
+            && (d.radius * 2.0).round() <= 1.0
+            && self.params.scatter <= 0.0;
         if !perfect {
             out.push(d);
             return;
@@ -790,11 +923,15 @@ impl StrokeEngine {
     }
 
     fn spacing_at(&self, q: Pt, dist: f32) -> f32 {
-        if self.params.pixel {
-            return 0.5;
-        }
         let d = self.params.size * self.size_scale(q, dist).max(0.0);
-        (d * self.params.spacing.max(0.01)).max(0.5)
+        let step = (d * self.params.spacing.max(0.01)).max(0.5);
+        // Aliased lines stay gap-free, unless the spacing is set wide on
+        // purpose (stamps along a path).
+        if self.params.pixel && self.params.spacing < 0.3 {
+            step.min(1.0)
+        } else {
+            step
+        }
     }
 
     fn segment(&mut self, a: Pt, b: Pt, out: &mut Vec<Dab>) {
@@ -1160,5 +1297,166 @@ mod tests {
         e.add_point(0.0, 0.0, 1.0, &mut dabs);
         e.add_point(0.0, 50.0, 1.0, &mut dabs);
         assert!((dabs.last().unwrap().angle - std::f32::consts::FRAC_PI_2).abs() < 1e-3);
+    }
+
+    fn footprint_rows(d: Dab) -> Vec<String> {
+        let (_, _, w, h, cov) = d.footprint();
+        (0..h as usize)
+            .map(|y| {
+                (0..w as usize)
+                    .map(|x| if cov[y * w as usize + x] { '#' } else { '.' })
+                    .collect::<String>()
+            })
+            .filter(|r| r.contains('#'))
+            .map(|r| r.trim_matches('.').to_string())
+            .collect()
+    }
+
+    #[test]
+    fn aliased_round_sizes() {
+        let at = |size: f32| {
+            footprint_rows(Dab {
+                x: 20.3,
+                y: 20.7,
+                radius: size / 2.0,
+                pixel: true,
+                ..Default::default()
+            })
+        };
+        assert_eq!(at(1.0), ["#"]);
+        assert_eq!(at(2.0), ["##", "##"]);
+        // Decimal sizes pick between the shapes a whole size can't.
+        assert_eq!(at(3.0), ["###", "###", "###"]);
+        assert_eq!(at(2.8), ["#", "###", "#"]);
+        assert_eq!(at(4.0), ["##", "####", "####", "##"]);
+        // Aliased coverage is all or nothing at the edge.
+        let mut m = Mask::new(16, 16);
+        let mut dirty = vec![];
+        m.stamp(
+            &Dab {
+                x: 8.0,
+                y: 8.0,
+                radius: 4.0,
+                pixel: true,
+                ..Default::default()
+            },
+            &mut dirty,
+        );
+        for y in 0..16 {
+            for x in 0..16 {
+                assert!(matches!(m.value(x, y), 0 | 65535));
+            }
+        }
+    }
+
+    #[test]
+    fn square_tip_with_roundness_and_angle() {
+        let sq = Dab {
+            x: 10.0,
+            y: 10.0,
+            radius: 2.0,
+            pixel: true,
+            tip: TipShape::Square,
+            ..Default::default()
+        };
+        assert_eq!(footprint_rows(sq), ["####"; 4]);
+        // Half as tall.
+        assert_eq!(
+            footprint_rows(Dab {
+                roundness: 0.5,
+                ..sq
+            }),
+            ["####"; 2]
+        );
+        // Turned 45°: a diamond.
+        let d = footprint_rows(Dab {
+            radius: 3.0,
+            angle: std::f32::consts::FRAC_PI_4,
+            ..sq
+        });
+        assert!(d.first().unwrap().len() < d[d.len() / 2].len(), "{d:?}");
+        // Antialiased squares fill their corners, unlike circles.
+        let mut m = Mask::new(64, 64);
+        let mut dirty = vec![];
+        m.stamp(
+            &Dab {
+                x: 32.0,
+                y: 32.0,
+                radius: 10.0,
+                tip: TipShape::Square,
+                ..Default::default()
+            },
+            &mut dirty,
+        );
+        assert_eq!(m.value(23, 23), 65535);
+        assert_eq!(m.value(32, 43), 0);
+    }
+
+    #[test]
+    fn image_tip_stamps_its_shape() {
+        // A ring: covered border, empty middle.
+        let n = 32u32;
+        let data = (0..n * n)
+            .map(|i| {
+                let (x, y) = ((i % n) as f32 - 15.5, (i / n) as f32 - 15.5);
+                let d = (x * x + y * y).sqrt();
+                if (10.0..15.0).contains(&d) { 255 } else { 0 }
+            })
+            .collect();
+        let id = crate::tip::register(crate::tip::TipImage::new(n, n, data));
+        for pixel in [false, true] {
+            let mut m = Mask::new(64, 64);
+            let mut dirty = vec![];
+            m.stamp(
+                &Dab {
+                    x: 32.0,
+                    y: 32.0,
+                    radius: 16.0,
+                    pixel,
+                    tip: TipShape::Image(id),
+                    ..Default::default()
+                },
+                &mut dirty,
+            );
+            assert_eq!(m.value(32, 32), 0, "{pixel}");
+            assert!(m.value(32 + 12, 32) > 60000, "{pixel}");
+            assert_eq!(m.value(32 + 18, 32), 0, "{pixel}");
+        }
+    }
+
+    #[test]
+    fn pixel_mode_keeps_brush_features() {
+        let base = BrushParams {
+            size: 6.0,
+            pixel: true,
+            pressure_size: false,
+            smoothing: 0.0,
+            ..Default::default()
+        };
+        let run = |p: BrushParams| {
+            let mut e = StrokeEngine::new(p);
+            let mut dabs = vec![];
+            for i in 0..=30 {
+                e.add_point(i as f32 * 3.0, 10.0, 1.0, &mut dabs);
+            }
+            e.finish(&mut dabs);
+            dabs
+        };
+        let plain = run(base);
+        assert!(plain.iter().all(|d| d.flow == 1.0 && d.roundness == 1.0));
+        // Dabs land on the pixel grid and repeats are dropped.
+        assert!(plain.iter().all(|d| d.x == d.x.round()));
+        assert!(plain.windows(2).all(|w| w[0].x != w[1].x));
+        let p = run(BrushParams {
+            flow: 0.5,
+            roundness: 0.4,
+            taper: 30.0,
+            size_jitter: 0.5,
+            tip: TipShape::Square,
+            ..base
+        });
+        assert!(p.iter().all(|d| d.flow == 0.5 && d.roundness == 0.4));
+        assert!(p.iter().all(|d| d.tip == TipShape::Square));
+        assert!(p[0].radius < 1.0);
     }
 }

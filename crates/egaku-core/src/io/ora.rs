@@ -135,7 +135,12 @@ pub fn save_to_vec(doc: &Document) -> Result<Vec<u8>> {
             );
             if let Content::Group { children, expanded } = &l.content {
                 *xml += &format!(
-                    "<stack{common} isolation=\"isolate\"{}>\n",
+                    "<stack{common} isolation=\"{}\"{}>\n",
+                    if l.blend == BlendMode::PassThrough {
+                        "auto"
+                    } else {
+                        "isolate"
+                    },
                     if *expanded {
                         ""
                     } else {
@@ -571,7 +576,20 @@ pub fn load_from_reader<R: Read + std::io::Seek>(r: R) -> Result<Document> {
             };
             l.opacity = f("opacity", 1.0).clamp(0.0, 1.0);
             l.visible = get("visibility") != Some("hidden");
-            l.blend = BlendMode::from_ora_name(get("composite-op").unwrap_or(""));
+            let op = get("composite-op").unwrap_or("");
+            l.blend = BlendMode::from_ora_name(op);
+            // A stack that may share its backdrop and blends normally is a
+            // Pass Through group (Krita may name it outright).
+            if l.is_group()
+                && ((get("isolation") == Some("auto")
+                    && matches!(l.blend, BlendMode::Normal)
+                    && op != "krita:dissolve")
+                    || op == "krita:pass through")
+            {
+                l.blend = BlendMode::PassThrough;
+            } else if !l.is_group() && l.blend == BlendMode::PassThrough {
+                l.blend = BlendMode::Normal;
+            }
             l.alpha_lock = t("egaku:alpha-lock");
             l.clip = t("egaku:clip");
             if t("selected") {
@@ -629,7 +647,10 @@ mod tests {
         ed.set_layer(top, "hide", |l| l.visible = false);
         ed.group_layer(top);
         let g = ed.doc.active_id();
-        ed.set_layer(g, "rename", |l| l.name = "Folder".into());
+        ed.set_layer(g, "rename", |l| {
+            l.name = "Folder".into();
+            l.blend = BlendMode::PassThrough;
+        });
         ed.select_layer(mid);
         let _ = Place {
             parent: None,
@@ -650,6 +671,7 @@ mod tests {
         let grp = &doc.layers()[2];
         assert!(grp.is_group());
         assert_eq!(grp.name, "Folder");
+        assert_eq!(grp.blend, BlendMode::PassThrough);
         assert_eq!(grp.children().len(), 1);
         assert!(!grp.children()[0].visible);
         // Pixels survive (within premultiplication rounding).
