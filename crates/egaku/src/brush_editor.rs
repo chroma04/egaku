@@ -11,7 +11,7 @@ use eframe::egui::{
     self, Align2, Color32, ColorImage, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
 use egaku_core::brush::{
-    BrushParams, Dab, LINEAR_CURVE, Mask, StrokeEngine, eval_curve, fit_curve,
+    BrushParams, Dab, LINEAR_CURVE, Mask, StrokeEngine, TipShape, eval_curve, fit_curve,
 };
 use egui_phosphor::regular as ph;
 
@@ -51,25 +51,42 @@ impl Pad {
         }
     }
 
-    fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.mask = Mask::new(PAD_W, PAD_H);
         self.engine = None;
         self.dirty = true;
     }
 }
 
+pub const PIXEL_HELP: &str = "Pixel-art mode: no antialiasing. Each pixel is in the tip or \
+     not, dabs sit on the pixel grid and lines have no gaps. Every other setting still \
+     works; decimal sizes pick between pixel shapes.";
+
+/// Choosing the tip's outline. Images are loaded in the brush editor; the
+/// image choice appears here once one is in use.
+pub fn tip_picker(ui: &mut Ui, p: &mut BrushParams, compact: bool) -> bool {
+    let mut opts = vec![
+        (TipShape::Round, ph::CIRCLE, "Round tip"),
+        (TipShape::Square, ph::SQUARE, "Square tip"),
+    ];
+    if let TipShape::Image(_) = p.tip {
+        opts.push((p.tip, ph::IMAGE, "Image tip"));
+    }
+    if !compact {
+        widgets::caption(ui, "Shape");
+    }
+    widgets::segmented(ui, &mut p.tip, &opts)
+}
+
 /// The settings the pad paints with: large brushes are scaled down to fit,
 /// with their texture and lengths scaled alike so it still looks right.
 fn pad_params(p: &BrushParams) -> (BrushParams, bool) {
     let mut q = *p;
-    if p.pixel {
-        q.size = p.size.clamp(1.0, 12.0);
-        return (q, p.size > 12.0);
-    }
-    let scaled = p.size > PAD_MAX_SIZE;
+    let max = if p.pixel { 16.0 } else { PAD_MAX_SIZE };
+    let scaled = p.size > max;
     if scaled {
-        let k = PAD_MAX_SIZE / p.size;
-        q.size = PAD_MAX_SIZE;
+        let k = max / p.size;
+        q.size = max;
         q.grain_scale = (p.grain_scale * k).max(1.5);
         q.taper = p.taper * k;
     }
@@ -385,77 +402,92 @@ impl App {
         let w = ui.available_width().min(420.0);
         let half = (w - 6.0) / 2.0;
 
+        let ctx = ui.ctx().clone();
+        let mut load_tip = false;
+        let mut tip_from_selection = false;
         section(ui, "Tip", true, |ui| {
             ui.horizontal_top(|ui| {
                 tip_preview(ui, &p);
                 ui.vertical(|ui| {
                     let fw = w - 70.0;
-                    if p.pixel {
-                        field(
-                            ui,
-                            "Size",
-                            &mut p.size,
-                            1.0,
-                            64.0,
-                            Scale::Linear,
-                            Fmt::px(),
-                            fw,
-                        );
-                        p.size = p.size.round().max(1.0);
-                    } else {
-                        field(
-                            ui,
-                            "Size",
-                            &mut p.size,
-                            1.0,
-                            1000.0,
-                            Scale::Log,
-                            Fmt::px().fine(),
-                            fw,
-                        );
-                        pct(ui, "Hardness", &mut p.hardness, fw);
-                    }
-                    if !p.pixel {
-                        field(
-                            ui,
-                            "Spacing",
-                            &mut p.spacing,
-                            0.01,
-                            1.5,
-                            Scale::Log,
-                            Fmt::pct(),
-                            fw,
-                        )
-                        .on_hover_text("Distance between dabs, as a share of the size");
-                    }
-                });
-            });
-            if !p.pixel {
-                ui.horizontal(|ui| {
-                    pct(ui, "Roundness", &mut p.roundness, half);
-                    p.roundness = p.roundness.max(0.02);
                     field(
                         ui,
-                        "Angle",
-                        &mut p.angle,
-                        -180.0,
-                        180.0,
-                        Scale::Linear,
-                        Fmt::int().suffix("°"),
-                        half,
-                    );
+                        "Size",
+                        &mut p.size,
+                        1.0,
+                        1000.0,
+                        Scale::Log,
+                        Fmt::px().fine(),
+                        fw,
+                    )
+                    .on_hover_text(if p.pixel {
+                        "Diameter in pixels. Fractions change which pixels a small tip covers."
+                    } else {
+                        "Diameter in pixels"
+                    });
+                    let image = matches!(p.tip, TipShape::Image(_));
+                    ui.add_enabled_ui(!image, |ui| {
+                        pct(ui, "Hardness", &mut p.hardness, fw).on_hover_text(if image {
+                            "Image tips bring their own softness"
+                        } else {
+                            "How far in from the edge the falloff starts"
+                        });
+                    });
+                    field(
+                        ui,
+                        "Spacing",
+                        &mut p.spacing,
+                        0.01,
+                        1.5,
+                        Scale::Log,
+                        Fmt::pct(),
+                        fw,
+                    )
+                    .on_hover_text("Distance between dabs, as a share of the size");
                 });
-                toggle(
+            });
+            ui.horizontal(|ui| {
+                tip_picker(ui, &mut p, false);
+                if ui
+                    .button(widgets::il(ph::IMAGE, "Image…"))
+                    .on_hover_text(
+                        "Use a picture as the tip: its transparency, or its darkness if it \
+                         has none, becomes the brush's shape",
+                    )
+                    .clicked()
+                {
+                    load_tip = true;
+                }
+                if ui
+                    .button(widgets::il(ph::SELECTION, "From selection"))
+                    .on_hover_text("Use the selected part of the canvas, as you see it, as the tip")
+                    .clicked()
+                {
+                    tip_from_selection = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                pct(ui, "Roundness", &mut p.roundness, half)
+                    .on_hover_text("Squashes the tip: 100% keeps its own proportions");
+                p.roundness = p.roundness.max(0.02);
+                field(
                     ui,
-                    &mut p.follow_direction,
-                    ph::NAVIGATION_ARROW,
-                    "Turn with the stroke",
-                    "The tip rotates to follow the direction you draw in",
+                    "Angle",
+                    &mut p.angle,
+                    -180.0,
+                    180.0,
+                    Scale::Linear,
+                    Fmt::int().suffix("°"),
+                    half,
                 );
-            } else {
-                ui.checkbox(&mut p.pixel_perfect, "Pixel-perfect lines")
-                    .on_hover_text("Removes doubled pixels at the corners of 1px lines");
-            }
+            });
+            toggle(
+                ui,
+                &mut p.follow_direction,
+                ph::NAVIGATION_ARROW,
+                "Turn with the stroke",
+                "The tip rotates to follow the direction you draw in",
+            );
         });
 
         section(ui, "Pressure", true, |ui| {
@@ -525,7 +557,7 @@ impl App {
             });
         });
 
-        if !p.pixel {
+        {
             section(ui, "Stroke", true, |ui| {
                 ui.horizontal(|ui| {
                     pct(ui, "Opacity", &mut p.opacity, half);
@@ -595,25 +627,24 @@ impl App {
             });
         }
 
-        section(ui, "Mode", false, |ui| {
-            toggle(
-                ui,
-                &mut p.pixel,
-                ph::GRID_FOUR,
-                "Pixel",
-                "Pixel-art mode: hard, aliased pixels with no gaps",
-            );
-            if p.pixel != before.pixel {
-                p.size = if p.pixel {
-                    p.size.clamp(1.0, 64.0).round()
-                } else {
-                    p.size
-                };
-            }
+        section(ui, "Mode", true, |ui| {
+            ui.horizontal(|ui| {
+                toggle(ui, &mut p.pixel, ph::GRID_FOUR, "Pixel", PIXEL_HELP);
+                if p.pixel {
+                    ui.checkbox(&mut p.pixel_perfect, "Pixel-perfect lines")
+                        .on_hover_text("Removes doubled pixels at the corners of 1px lines");
+                }
+            });
         });
 
         if p != before {
             *self.current_brush_mut() = p;
+        }
+        if load_tip {
+            self.load_brush_tip(&ctx);
+        }
+        if tip_from_selection {
+            self.brush_tip_from_selection(&ctx);
         }
     }
 }
@@ -632,10 +663,16 @@ fn section(ui: &mut Ui, title: &str, open: bool, body: impl FnOnce(&mut Ui)) {
 fn tip_preview(ui: &mut Ui, p: &BrushParams) {
     let (rect, _) = ui.allocate_exact_size(vec2(60.0, 60.0), Sense::hover());
     ui.painter().rect_filled(rect, 6.0, theme::BG_RAISED);
-    let n = 48u32;
+    // Aliased tips are shown at their true size, pixel by pixel, while
+    // they fit.
+    let (n, r) = if p.pixel {
+        let side = p.size.clamp(1.0, 40.0);
+        ((side.ceil() as u32 + 6).clamp(9, 48), side * 0.5)
+    } else {
+        (48u32, 20.0)
+    };
     let mut mask = Mask::new(n, n);
     let mut dirty = vec![];
-    let r = if p.pixel { 8.0 } else { 20.0 };
     mask.stamp(
         &Dab {
             x: n as f32 / 2.0,
@@ -645,7 +682,8 @@ fn tip_preview(ui: &mut Ui, p: &BrushParams) {
             flow: 1.0,
             cap: 1.0,
             pixel: p.pixel,
-            roundness: if p.pixel { 1.0 } else { p.roundness },
+            tip: p.tip,
+            roundness: p.roundness,
             angle: p.angle.to_radians(),
             grain: p.grain,
             grain_scale: (p.grain_scale * r * 2.0 / p.size.max(1.0)).max(1.5),

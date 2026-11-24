@@ -3,6 +3,7 @@
 //! * [`tile`]: sparse copy-on-write 64×64 tile storage
 //! * [`blend`]: layer blend modes
 //! * [`brush`]: dab-based brush engine with a 16-bit stroke mask
+//! * [`tip`]: brush tips made from images
 //! * [`render`]: cached, incrementally updated composite and mip pyramid
 //! * [`history`]: snapshot-based undo
 //! * [`editor`]: the editing API tying it all together
@@ -26,6 +27,7 @@ pub mod render;
 pub mod selection;
 pub mod thumb;
 pub mod tile;
+pub mod tip;
 pub mod transform;
 
 pub use document::{Document, Layer};

@@ -250,6 +250,7 @@ impl App {
             .storage
             .and_then(|s| eframe::get_value(s, PREFS_KEY))
             .unwrap_or_default();
+        prefs.register_tips();
         let doc = Document::new(prefs.new_width, prefs.new_height, prefs.new_paper);
         let (io_tx, io_rx) = channel();
         let tablet = crate::tablet::Tablet::new(cc);
@@ -338,6 +339,35 @@ impl App {
         } else {
             &mut self.prefs.brush
         }
+    }
+
+    /// Sets the blend mode of layers as one undo step. Pass Through only
+    /// applies to groups; other layers get Normal.
+    pub fn set_blend(&mut self, ids: &[LayerId], blend: egaku_core::blend::BlendMode) {
+        use egaku_core::blend::BlendMode;
+        self.ed.set_layers(ids, "Blend mode", |l| {
+            l.blend = if blend == BlendMode::PassThrough && !l.is_group() {
+                BlendMode::Normal
+            } else {
+                blend
+            };
+        });
+    }
+
+    /// Steps the selected layers' blend mode through the menu order.
+    pub fn cycle_blend(&mut self, ctx: &egui::Context, step: i32) {
+        use egaku_core::blend::BlendMode;
+        let l = self.ed.doc.active_layer();
+        let group = l.is_group();
+        let modes: Vec<BlendMode> = BlendMode::ALL
+            .into_iter()
+            .filter(|m| group || *m != BlendMode::PassThrough)
+            .collect();
+        let i = modes.iter().position(|m| *m == l.blend).unwrap_or(0) as i32;
+        let next = modes[(i + step).rem_euclid(modes.len() as i32) as usize];
+        let ids = self.ed.selected_layers();
+        self.set_blend(&ids, next);
+        self.toast(ctx, format!("Blend mode: {}", next.name()), false);
     }
 
     pub fn set_fg(&mut self, c: [u8; 3]) {
@@ -685,6 +715,58 @@ impl App {
         d
     }
 
+    /// Asks for an image and makes it the current brush's tip.
+    pub fn load_brush_tip(&mut self, ctx: &egui::Context) {
+        let Some(path) = self
+            .dialog()
+            .set_title("Brush tip image")
+            .add_filter("Images", io::IMAGE_EXTENSIONS)
+            .pick_file()
+        else {
+            return;
+        };
+        self.remember_dir(&path);
+        match io::decode(&path) {
+            Ok(d) => self.use_brush_tip(ctx, d.width, d.height, &d.rgba),
+            Err(e) => self.toast(ctx, format!("Couldn't open that image: {e}"), true),
+        }
+    }
+
+    /// Makes the selected part of the canvas (as seen) the brush's tip.
+    pub fn brush_tip_from_selection(&mut self, ctx: &egui::Context) {
+        if self.ed.doc.state.selection.is_none() {
+            self.toast(ctx, "Select the shape to use as a tip first", true);
+            return;
+        }
+        if let Some(c) = self.ed.copy(true) {
+            self.use_brush_tip(ctx, c.width, c.height, &c.rgba);
+        }
+    }
+
+    fn use_brush_tip(&mut self, ctx: &egui::Context, w: u32, h: u32, rgba: &[u8]) {
+        use egaku_core::brush::TipShape;
+        use egaku_core::tip::TipImage;
+        let Some(tip) = TipImage::from_rgba(w, h, rgba) else {
+            self.toast(ctx, "That image is empty, so it can't be a tip", true);
+            return;
+        };
+        let (tw, th) = (tip.width(), tip.height());
+        let saved = crate::prefs::SavedTip::new(&tip);
+        let id = egaku_core::tip::register(tip);
+        if !self.prefs.brush_tips.iter().any(|t| t.id == id) {
+            self.prefs.brush_tips.push(saved);
+        }
+        let b = self.current_brush_mut();
+        b.tip = TipShape::Image(id);
+        // Keep the tip's own proportions and turn.
+        b.roundness = 1.0;
+        b.angle = 0.0;
+        if let Some(pad) = &mut self.pad {
+            pad.clear();
+        }
+        self.toast(ctx, format!("Brush tip: {tw} × {th} px"), false);
+    }
+
     fn remember_dir(&mut self, p: &Path) {
         self.prefs.last_dir = p.parent().map(Path::to_path_buf);
     }
@@ -981,7 +1063,11 @@ impl App {
     }
 
     pub fn store(&self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, PREFS_KEY, &self.prefs);
+        // Only keep the tip images some brush still uses.
+        let mut prefs = self.prefs.clone();
+        let used = prefs.tips_in_use();
+        prefs.brush_tips.retain(|t| used.contains(&t.id));
+        eframe::set_value(storage, PREFS_KEY, &prefs);
     }
 
     /// The topmost visible pixel-bearing layer at a canvas point.

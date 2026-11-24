@@ -100,12 +100,26 @@ fn main() -> eframe::Result {
             .with_app_id("egaku")
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([900.0, 560.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(icon()),
         ..Default::default()
     };
     eframe::run_native(
         "egaku",
         options,
         Box::new(move |cc| Ok(Box::new(app::App::new(cc, open)))),
+    )
+}
+
+/// The window icon, from the same image the packages use.
+fn icon() -> egui::IconData {
+    let png = include_bytes!("../../../packaging/icons/egaku-256.png");
+    egaku_core::io::decode_bytes(png).map_or_else(
+        |_| egui::IconData::default(),
+        |d| egui::IconData {
+            rgba: d.rgba,
+            width: d.width,
+            height: d.height,
+        },
     )
 }

@@ -95,6 +95,33 @@ fn handle_box(painter: &egui::Painter, p: Pos2) {
     );
 }
 
+/// The outline of a dab's tip in canvas coordinates: an ellipse for round
+/// tips, a rectangle for square ones and the image's box for image tips.
+fn tip_outline(d: &egaku_core::brush::Dab) -> Vec<(f32, f32)> {
+    use egaku_core::brush::TipShape;
+    let (r, k) = (d.radius, d.roundness.clamp(0.02, 1.0));
+    let (ca, sa) = (d.angle.cos(), d.angle.sin());
+    let local: Vec<(f32, f32)> = match d.tip {
+        TipShape::Round => (0..48)
+            .map(|i| {
+                let t = i as f32 / 48.0 * std::f32::consts::TAU;
+                (t.cos() * r, t.sin() * r * k)
+            })
+            .collect(),
+        TipShape::Square => vec![(-r, -r * k), (r, -r * k), (r, r * k), (-r, r * k)],
+        TipShape::Image(id) => {
+            let (w, h) = egaku_core::tip::get(id)
+                .map_or((1.0, 1.0), |t| (t.width() as f32, t.height() as f32));
+            let (hw, hh) = (r * w / w.max(h), r * h / w.max(h) * k);
+            vec![(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
+        }
+    };
+    local
+        .into_iter()
+        .map(|(u, v)| (d.x + u * ca - v * sa, d.y + u * sa + v * ca))
+        .collect()
+}
+
 fn frame_lines(painter: &egui::Painter, s: &[Pos2; 4], col: Color32) {
     for i in 0..4 {
         let (a, b) = (s[i], s[(i + 1) % 4]);
@@ -418,34 +445,68 @@ impl App {
             if let Active::Tool(t @ (Tool::Brush | Tool::Eraser)) = active {
                 let b = self.brush_params(t);
                 let c = view.to_canvas(vp, ppp, p);
-                if b.pixel {
+                let dab = egaku_core::brush::Dab {
+                    x: c.x,
+                    y: c.y,
+                    radius: (b.size * 0.5).max(0.5),
+                    pixel: b.pixel,
+                    tip: b.tip,
+                    roundness: b.roundness,
+                    angle: b.angle.to_radians(),
+                    hardness: b.hardness,
+                    ..Default::default()
+                };
+                if b.pixel && b.size <= 160.0 {
                     // Outline the exact pixels the dab will cover.
-                    let side = b.size.round().max(1.0);
-                    let x0 = (c.x - side * 0.5 + 0.5).floor();
-                    let y0 = (c.y - side * 0.5 + 0.5).floor();
-                    let q = [
-                        to_s(x0, y0),
-                        to_s(x0 + side, y0),
-                        to_s(x0 + side, y0 + side),
-                        to_s(x0, y0 + side),
-                    ];
-                    if side * scale >= 4.0 {
-                        frame_lines(&painter, &q, Color32::WHITE);
+                    if b.size * scale >= 4.0 {
+                        let (x0, y0, w, h, cov) = dab.footprint();
+                        let at = |x: i64, y: i64| {
+                            x >= 0
+                                && y >= 0
+                                && x < w as i64
+                                && y < h as i64
+                                && cov[(y as u32 * w + x as u32) as usize]
+                        };
+                        let mut edges = vec![];
+                        for y in 0..h as i64 {
+                            for x in 0..w as i64 {
+                                if !at(x, y) {
+                                    continue;
+                                }
+                                let (px, py) = ((x0 + x) as f32, (y0 + y) as f32);
+                                if !at(x, y - 1) {
+                                    edges.push([to_s(px, py), to_s(px + 1.0, py)]);
+                                }
+                                if !at(x, y + 1) {
+                                    edges.push([to_s(px, py + 1.0), to_s(px + 1.0, py + 1.0)]);
+                                }
+                                if !at(x - 1, y) {
+                                    edges.push([to_s(px, py), to_s(px, py + 1.0)]);
+                                }
+                                if !at(x + 1, y) {
+                                    edges.push([to_s(px + 1.0, py), to_s(px + 1.0, py + 1.0)]);
+                                }
+                            }
+                        }
+                        for e in &edges {
+                            painter
+                                .line_segment(*e, Stroke::new(3.0, Color32::from_black_alpha(90)));
+                        }
+                        for e in &edges {
+                            painter.line_segment(*e, Stroke::new(1.2, Color32::WHITE));
+                        }
                     }
-                } else {
-                    let r = b.size * 0.5 * scale;
-                    if r > 3.0 {
-                        painter.circle_stroke(
-                            p,
-                            r + 0.5,
-                            Stroke::new(1.0, Color32::from_black_alpha(140)),
-                        );
-                        painter.circle_stroke(
-                            p,
-                            r - 0.5,
-                            Stroke::new(1.0, Color32::from_white_alpha(200)),
-                        );
-                    }
+                } else if b.size * 0.5 * scale > 3.0 {
+                    let pts = tip_outline(&dab);
+                    let pts: Vec<Pos2> = pts.into_iter().map(|(x, y)| to_s(x, y)).collect();
+                    painter.add(egui::Shape::closed_line(
+                        pts.clone(),
+                        Stroke::new(3.0, Color32::from_black_alpha(110)),
+                    ));
+                    painter.add(egui::Shape::closed_line(
+                        pts,
+                        Stroke::new(1.0, Color32::from_white_alpha(210)),
+                    ));
                 }
                 // A tiny crosshair marks the exact hotspot at any size.
                 let k = 3.0;

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use rayon::prelude::*;
 
-use crate::blend::blend_tile;
+use crate::blend::{BlendMode, blend_tile_at};
 use crate::document::{Document, Layer, LayerId};
 use crate::tile::{TILE, Tile, TileCoord, TileRect, tiles_for};
 
@@ -104,19 +104,56 @@ fn list(layers: &[Layer], c: TileCoord, out: &mut Tile, ov: &dyn Ov, target: &[L
             if target.contains(&base.id) {
                 ov.under(base, c, out);
             }
+            let clips = &layers[i + 1..j];
+            let clipped = clips.iter().any(|l| l.is_shown());
+            if !clipped && pass_through(base, c, out, ov, target) {
+                i = j;
+                continue;
+            }
             if let Some(t) = content(base, c, ov, target) {
-                let clips = &layers[i + 1..j];
-                if clips.iter().any(|l| l.is_shown()) {
+                if clipped {
                     let mut t = t.into_owned();
                     apply_clips(&mut t, clips, c, ov, target);
-                    blend_tile(out, &t, base.opacity_u8(), base.blend);
+                    blend_tile_at(out, &t, base.opacity_u8(), base.blend, c);
                 } else {
-                    blend_tile(out, &t, base.opacity_u8(), base.blend);
+                    blend_tile_at(out, &t, base.opacity_u8(), base.blend, c);
                 }
             }
         }
         i = j;
     }
+}
+
+/// Composites a Pass Through group's children straight onto `out`, with
+/// the group's opacity fading between before and after. Returns false
+/// (doing nothing) if `l` isn't such a group or is being replaced by an
+/// override, so the caller composites it in isolation instead. A group
+/// with layers clipped to it is always isolated, since they clip to its
+/// combined content.
+fn pass_through(l: &Layer, c: TileCoord, out: &mut Tile, ov: &dyn Ov, target: &[LayerId]) -> bool {
+    let crate::document::Content::Group { children, .. } = &l.content else {
+        return false;
+    };
+    if l.blend != BlendMode::PassThrough || (target.contains(&l.id) && ov.tile(l, c).is_some()) {
+        return false;
+    }
+    let op = l.opacity_u8();
+    if op == 0 {
+        return true;
+    }
+    if op == 255 {
+        list(children, c, out, ov, target);
+        return true;
+    }
+    let mut after = out.clone();
+    list(children, c, &mut after, ov, target);
+    let (o, inv) = (op as u32, 255 - op as u32);
+    for (d, a) in out.px.iter_mut().zip(after.px.iter()) {
+        for ch in 0..4 {
+            d[ch] = crate::blend::div255(a[ch] as u32 * o + d[ch] as u32 * inv) as u8;
+        }
+    }
+    true
 }
 
 fn apply_clips(base: &mut Tile, clips: &[Layer], c: TileCoord, ov: &dyn Ov, target: &[LayerId]) {
@@ -141,7 +178,7 @@ fn apply_clips(base: &mut Tile, clips: &[Layer], c: TileCoord, ov: &dyn Ov, targ
             ov.under(l, c, base);
         }
         if let Some(t) = content(l, c, ov, target) {
-            blend_tile(base, &t, l.opacity_u8(), l.blend);
+            blend_tile_at(base, &t, l.opacity_u8(), l.blend, c);
         }
     }
     for (a, p) in alpha.iter().zip(base.px.iter_mut()) {
@@ -535,6 +572,36 @@ mod tests {
         assert_eq!(preview, committed);
         assert_eq!(ed.projection.pixel(100, 100), [0, 0, 0, 255]);
         assert!(!ed.projection.has_pending());
+    }
+
+    #[test]
+    fn pass_through_groups_blend_children_with_what_is_below() {
+        use crate::blend::BlendMode;
+        use crate::document::Content;
+        let mut doc = Document::new(64, 64, Some([200, 200, 200]));
+        let mut child = doc.new_layer("multiply");
+        child.blend = BlendMode::Multiply;
+        *child.tiles_mut().get_mut_or_insert(TileCoord::new(0, 0)) =
+            Tile::filled([100, 100, 100, 255]);
+        let mut group = doc.new_layer("group");
+        group.content = Content::Group {
+            children: vec![child],
+            expanded: true,
+        };
+        doc.state.layers = vec![group];
+        let px = |doc: &Document| {
+            let mut p = Projection::new(64, 64);
+            p.update_all(doc, &NoOverride);
+            p.pixel(5, 5)
+        };
+        // Isolated: the multiply has nothing under it inside the group.
+        assert_eq!(px(&doc)[0], 100);
+        doc.state.layers[0].blend = BlendMode::PassThrough;
+        // Pass through: it multiplies the paper.
+        assert_eq!(px(&doc)[0], 78);
+        doc.state.layers[0].opacity = 0.5;
+        let half = px(&doc)[0];
+        assert!((138..=140).contains(&half), "{half}");
     }
 
     #[test]

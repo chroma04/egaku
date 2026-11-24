@@ -1720,6 +1720,9 @@ impl Editor {
                 if !l.is_paintable() {
                     l.content = Content::Raster;
                     l.cels = vec![None; frames];
+                    if l.blend == BlendMode::PassThrough {
+                        l.blend = BlendMode::Normal;
+                    }
                 }
             }
             doc.state.active = lower_id;
@@ -1943,6 +1946,9 @@ impl Editor {
                 l.tiles = Arc::new(g);
                 l.content = Content::Raster;
                 l.cels = vec![None; frames];
+                if l.blend == BlendMode::PassThrough {
+                    l.blend = BlendMode::Normal;
+                }
             }
         });
     }

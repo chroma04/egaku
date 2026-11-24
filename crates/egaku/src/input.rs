@@ -1130,6 +1130,13 @@ impl App {
                 _ => {}
             }
         }
+        // Photoshop's blend mode stepping.
+        if shift_key(Key::Plus) || shift_key(Key::Equals) {
+            self.cycle_blend(ctx, 1);
+        }
+        if shift_key(Key::Minus) {
+            self.cycle_blend(ctx, -1);
+        }
         if key(Key::Slash) {
             self.ed
                 .set_layer(active, "Alpha lock", |l| l.alpha_lock = !l.alpha_lock);
@@ -1144,16 +1151,18 @@ impl App {
         if matches!(self.prefs.tool, Tool::Brush | Tool::Eraser) {
             let b = self.current_brush_mut();
             let pixel = b.pixel;
+            // Aliased brushes step by whole pixels while small, where each
+            // pixel changes the shape.
             if key(Key::OpenBracket) {
-                b.size = if pixel {
-                    (b.size - 1.0).max(1.0)
+                b.size = if pixel && b.size <= 16.0 {
+                    ((b.size - 1.0).ceil()).max(1.0)
                 } else {
                     (b.size / 1.18).max(1.0)
                 };
             }
             if key(Key::CloseBracket) {
-                b.size = if pixel {
-                    (b.size + 1.0).min(64.0)
+                b.size = if pixel && b.size < 16.0 {
+                    (b.size + 1.0).floor()
                 } else {
                     (b.size * 1.18).min(2000.0)
                 };
@@ -1234,6 +1243,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Alt+G", "Clip to layer below"),
     ("Ctrl+E", "Merge down"),
     ("/", "Lock layer alpha"),
+    ("Shift+Plus / Shift+Minus", "Next / previous blend mode"),
     ("Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"),
     ("Ctrl+Shift+N", "New layer"),
     ("P  ·  ,  .", "Play animation · previous / next frame"),

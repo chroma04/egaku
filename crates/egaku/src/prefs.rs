@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use egaku_core::brush::BrushParams;
+use egaku_core::brush::{BrushParams, TipShape};
 use egaku_core::io::Format;
 use egaku_core::object::TextAlign;
 use egui_phosphor::regular as ph;
@@ -231,6 +231,7 @@ pub fn presets() -> [Preset; 10] {
                 smoothing: 0.0,
                 pixel: true,
                 pixel_perfect: true,
+                tip: TipShape::Square,
                 ..d
             },
         },
@@ -291,6 +292,57 @@ pub fn presets() -> [Preset; 10] {
             },
         },
     ]
+}
+
+/// A brush tip image kept with the settings, as a base64 greyscale PNG.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedTip {
+    pub id: u64,
+    pub png: String,
+}
+
+impl SavedTip {
+    pub fn new(tip: &egaku_core::tip::TipImage) -> Self {
+        SavedTip {
+            id: tip.id(),
+            png: base64_encode(&tip.to_png()),
+        }
+    }
+}
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(B64[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0);
+    for b in s.bytes().filter(|b| !b.is_ascii_whitespace() && *b != b'=') {
+        let v = B64.iter().position(|c| *c == b)? as u32;
+        acc = acc << 6 | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
 }
 
 /// A brush the user saved.
@@ -364,6 +416,8 @@ pub struct Prefs {
     pub panel_swatches: bool,
     pub user_brushes: Vec<UserBrush>,
     pub brush_editor: bool,
+    /// Image tips used by the brushes above.
+    pub brush_tips: Vec<SavedTip>,
 }
 
 impl Default for Prefs {
@@ -410,6 +464,7 @@ impl Default for Prefs {
             panel_swatches: true,
             user_brushes: vec![],
             brush_editor: false,
+            brush_tips: vec![],
         }
     }
 }
@@ -450,11 +505,49 @@ impl Prefs {
         self.recent_files.truncate(10);
     }
 
+    /// Makes the saved tip images available to the brush engine.
+    pub fn register_tips(&self) {
+        for t in &self.brush_tips {
+            if let Some(img) =
+                base64_decode(&t.png).and_then(|b| egaku_core::tip::TipImage::from_png(&b))
+            {
+                egaku_core::tip::register(img);
+            }
+        }
+    }
+
+    /// Ids of the image tips the current and saved brushes use.
+    pub fn tips_in_use(&self) -> Vec<u64> {
+        std::iter::once(&self.brush)
+            .chain(std::iter::once(&self.eraser))
+            .chain(self.user_brushes.iter().map(|b| &b.params))
+            .filter_map(|b| match b.tip {
+                TipShape::Image(id) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn text_align(&self) -> TextAlign {
         match self.text.align_i {
             1 => TextAlign::Center,
             2 => TextAlign::Right,
             _ => TextAlign::Left,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_round_trips() {
+        for n in 0..20u8 {
+            let data: Vec<u8> = (0..n).map(|i| i.wrapping_mul(37)).collect();
+            assert_eq!(base64_decode(&base64_encode(&data)).unwrap(), data);
+        }
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
     }
 }
