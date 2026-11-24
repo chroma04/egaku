@@ -151,17 +151,48 @@ impl Source {
     }
 
     fn mips(&self) -> &[TileGrid] {
-        self.mips.get_or_init(|| {
-            let mut levels: Vec<TileGrid> = vec![];
-            let (mut w, mut h) = (self.width, self.height);
-            while w > 64 || h > 64 {
-                let next = downsample_grid(levels.last().unwrap_or(&self.base), w, h);
-                w = w.div_ceil(2);
-                h = h.div_ceil(2);
-                levels.push(next);
-            }
-            levels
-        })
+        // Tiles render in parallel, so this is usually reached from a rayon
+        // worker. Building in parallel while holding the lock would let the
+        // waiting worker steal another tile's job, which then re-enters the
+        // lock on the same thread and deadlocks. Under the lock the build
+        // is serial; `prepare` builds in parallel up front, unlocked.
+        self.mips.get_or_init(|| self.build_mips(false))
+    }
+
+    fn build_mips(&self, parallel: bool) -> Vec<TileGrid> {
+        let mut levels: Vec<TileGrid> = vec![];
+        let (mut w, mut h) = (self.width, self.height);
+        while w > 64 || h > 64 {
+            let src = levels.last().unwrap_or(&self.base);
+            let next = downsample_grid_with(src, w, h, parallel);
+            w = w.div_ceil(2);
+            h = h.div_ceil(2);
+            levels.push(next);
+        }
+        levels
+    }
+
+    /// The pyramid level a render through `m` samples.
+    fn level_for(&self, m: &Affine, smooth: bool) -> usize {
+        let (sx, sy) = m.scales();
+        // Source pixels per canvas pixel decides the pyramid level.
+        let footprint = 1.0 / sx.min(sy).max(1e-6);
+        if smooth && footprint >= 2.0 {
+            (footprint.log2().floor() as usize).min(self.mips().len())
+        } else {
+            0
+        }
+    }
+
+    /// Builds the mip pyramid a render through `m` will need, in parallel,
+    /// before its tiles are rendered (which would otherwise build it
+    /// serially on first use).
+    pub fn prepare(&self, m: &Affine, smooth: bool) {
+        let (sx, sy) = m.scales();
+        if smooth && sx.min(sy) <= 0.5 && self.mips.get().is_none() {
+            // Losing a race to a worker that built them meanwhile is fine.
+            let _ = self.mips.set(self.build_mips(true));
+        }
     }
 
     fn level(&self, l: usize) -> &TileGrid {
@@ -218,14 +249,7 @@ impl Source {
         smooth: bool,
         c: TileCoord,
     ) -> Option<Tile> {
-        let (sx, sy) = m.scales();
-        // Source pixels per canvas pixel decides the pyramid level.
-        let footprint = 1.0 / sx.min(sy).max(1e-6);
-        let level = if smooth && footprint >= 2.0 {
-            (footprint.log2().floor() as usize).min(self.mips().len())
-        } else {
-            0
-        };
+        let level = self.level_for(m, smooth);
         let grid = self.level(level);
         let k = (1u32 << level) as f32;
         let (bx0, by0, bx1, by1) = self.bounds;
@@ -275,6 +299,7 @@ impl Source {
         let mut g = TileGrid::new(width, height);
         let Some(inv) = m.inverse() else { return g };
         let rect = self.dest_tiles(m, g.cols(), g.rows());
+        self.prepare(m, smooth);
         let coords: Vec<TileCoord> = rect.iter().collect();
         let tiles: Vec<(TileCoord, Option<Tile>)> = coords
             .par_iter()
@@ -344,6 +369,10 @@ fn bilinear(g: &TileGrid, u: f32, v: f32) -> Px {
 
 /// Halves a grid with a box filter.
 pub fn downsample_grid(src: &TileGrid, w: u32, h: u32) -> TileGrid {
+    downsample_grid_with(src, w, h, true)
+}
+
+fn downsample_grid_with(src: &TileGrid, w: u32, h: u32, parallel: bool) -> TileGrid {
     let (nw, nh) = (w.div_ceil(2), h.div_ceil(2));
     let mut out = TileGrid::new(nw, nh);
     let (cols, rows) = (tiles_for(nw), tiles_for(nh));
@@ -359,32 +388,34 @@ pub fn downsample_grid(src: &TileGrid, w: u32, h: u32) -> TileGrid {
             })
         })
         .collect();
-    let tiles: Vec<(TileCoord, Option<Tile>)> = coords
-        .par_iter()
-        .map(|&c| {
-            let mut t = Tile::filled([0; 4]);
-            let mut any = false;
-            for y in 0..TILE {
-                for x in 0..TILE {
-                    let sx = (c.x as i64 * TILE as i64 + x as i64) * 2;
-                    let sy = (c.y as i64 * TILE as i64 + y as i64) * 2;
-                    let ps = [
-                        src.pixel(sx, sy),
-                        src.pixel(sx + 1, sy),
-                        src.pixel(sx, sy + 1),
-                        src.pixel(sx + 1, sy + 1),
-                    ];
-                    let mut o = [0u8; 4];
-                    for ch in 0..4 {
-                        o[ch] = ((ps.iter().map(|p| p[ch] as u32).sum::<u32>() + 2) / 4) as u8;
-                    }
-                    any |= o[3] != 0;
-                    t.px[y * TILE + x] = o;
+    let tile = |&c: &TileCoord| {
+        let mut t = Tile::filled([0; 4]);
+        let mut any = false;
+        for y in 0..TILE {
+            for x in 0..TILE {
+                let sx = (c.x as i64 * TILE as i64 + x as i64) * 2;
+                let sy = (c.y as i64 * TILE as i64 + y as i64) * 2;
+                let ps = [
+                    src.pixel(sx, sy),
+                    src.pixel(sx + 1, sy),
+                    src.pixel(sx, sy + 1),
+                    src.pixel(sx + 1, sy + 1),
+                ];
+                let mut o = [0u8; 4];
+                for ch in 0..4 {
+                    o[ch] = ((ps.iter().map(|p| p[ch] as u32).sum::<u32>() + 2) / 4) as u8;
                 }
+                any |= o[3] != 0;
+                t.px[y * TILE + x] = o;
             }
-            (c, any.then_some(t))
-        })
-        .collect();
+        }
+        (c, any.then_some(t))
+    };
+    let tiles: Vec<(TileCoord, Option<Tile>)> = if parallel {
+        coords.par_iter().map(tile).collect()
+    } else {
+        coords.iter().map(tile).collect()
+    };
     for (c, t) in tiles {
         if let Some(t) = t {
             out.set(c, Some(Arc::new(t)));
@@ -454,5 +485,45 @@ mod tests {
         let p = r.pixel(16, 16);
         assert!((p[0] as i32 - 128).abs() < 8, "{p:?}");
         assert_eq!(p[3], 255);
+    }
+
+    /// The first smooth downscale past 50% builds the pyramid from inside
+    /// parallel tile rendering; that must not deadlock.
+    #[test]
+    fn first_downscale_in_parallel_does_not_deadlock() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(16)
+            .build()
+            .unwrap();
+        let (w, h) = (1200u32, 900u32);
+        let rgba: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8).collect();
+        for _ in 0..100 {
+            let s = Source::from_rgba(w, h, &rgba);
+            let m = Affine::scale(0.45, 0.45);
+            let inv = m.inverse().unwrap();
+            let rect = s.dest_tiles(&m, tiles_for(w), tiles_for(h));
+            let coords: Vec<TileCoord> = rect.iter().collect();
+            // Like the projection: transformed tiles mixed with other work
+            // that keeps the remaining workers busy and stealing.
+            let n = pool.install(|| {
+                (0..coords.len() * 8)
+                    .into_par_iter()
+                    .with_max_len(1)
+                    .filter_map(|i| {
+                        if i % 8 == 0 {
+                            s.render_tile(&m, &inv, true, coords[i / 8])
+                        } else {
+                            let mut x = i as u64;
+                            for _ in 0..2_000 {
+                                x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                            }
+                            std::hint::black_box(x);
+                            None
+                        }
+                    })
+                    .count()
+            });
+            assert!(n > 0);
+        }
     }
 }
