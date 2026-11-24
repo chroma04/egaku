@@ -1,0 +1,160 @@
+name: Release
+
+# Builds installable packages for Windows, macOS and Linux.
+#
+# Push a tag like `v0.2.0` to build everything and publish a GitHub release
+# with the packages attached. Running the workflow by hand ("Run workflow" on
+# the Actions tab) builds the same packages as downloadable artifacts without
+# publishing anything.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)-dev.${GITHUB_SHA::7}"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: version
+    # The oldest supported runner, so the binary runs on older glibc too.
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p egaku
+      - name: AppImage and tarball
+        run: |
+          set -euxo pipefail
+          name="egaku-$VERSION-linux-x86_64"
+          # AppDir layout: the binary, its desktop entry and icon.
+          app=AppDir
+          mkdir -p dist
+          install -Dm755 target/release/egaku "$app/usr/bin/egaku"
+          install -Dm644 packaging/linux/egaku.desktop "$app/usr/share/applications/egaku.desktop"
+          install -Dm644 packaging/icons/egaku.png "$app/usr/share/icons/hicolor/512x512/apps/egaku.png"
+          install -Dm644 packaging/icons/egaku-256.png "$app/usr/share/icons/hicolor/256x256/apps/egaku.png"
+          cp packaging/linux/egaku.desktop packaging/icons/egaku.png "$app/"
+          ln -s usr/bin/egaku "$app/AppRun"
+          curl -fsSL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          # Runners have no FUSE; the tool can unpack itself instead.
+          APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 ./appimagetool --no-appstream "$app" "dist/$name.AppImage"
+          # A plain tarball for people who'd rather install it themselves.
+          mkdir -p "$name"
+          cp target/release/egaku README.md LICENSE "$name/"
+          cp packaging/linux/egaku.desktop packaging/icons/egaku.png "$name/"
+          tar czf "dist/$name.tar.gz" "$name"
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p egaku
+      - name: Portable exe and zip
+        shell: pwsh
+        run: |
+          $name = "egaku-$env:VERSION-windows-x86_64"
+          New-Item -ItemType Directory -Force dist, $name | Out-Null
+          Copy-Item target/release/egaku.exe "dist/$name.exe"
+          Copy-Item target/release/egaku.exe, README.md, LICENSE $name
+          Compress-Archive -Path $name -DestinationPath "dist/$name.zip"
+          Get-ChildItem dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  macos:
+    needs: version
+    runs-on: macos-14
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p egaku --target aarch64-apple-darwin
+      - run: cargo build --release --locked -p egaku --target x86_64-apple-darwin
+      - name: Universal app and disk image
+        run: |
+          set -euxo pipefail
+          name="egaku-$VERSION-macos-universal"
+          app=egaku.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" dist
+          # One binary for Apple silicon and Intel Macs.
+          lipo -create -output "$app/Contents/MacOS/egaku" \
+            target/aarch64-apple-darwin/release/egaku \
+            target/x86_64-apple-darwin/release/egaku
+          sed "s/@VERSION@/$VERSION/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          cp packaging/icons/egaku.icns "$app/Contents/Resources/egaku.icns"
+          # Ad-hoc signature: not notarized, but required to run on Apple silicon.
+          codesign --force --deep --sign - "$app"
+          # A disk image with the usual drag-to-Applications layout.
+          mkdir dmg
+          cp -R "$app" dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname egaku -srcfolder dmg -ov -format UDZO "dist/$name.dmg"
+          ditto -c -k --keepParent "$app" "dist/$name.zip"
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [version, linux, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: egaku ${{ needs.version.outputs.version }}
+          files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ contains(needs.version.outputs.version, '-') }}

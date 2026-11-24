@@ -11,27 +11,36 @@ Huge canvases and hundreds of layers stay fast. Text and placed images stay
 editable until you decide otherwise. A grey, quiet interface keeps the
 artwork the only colourful thing on screen.
 
+Download a build for Windows (`.exe`), macOS (`.dmg`, Apple silicon and
+Intel) or Linux (`.AppImage` or `.tar.gz`) from the
+[releases page](https://github.com/chroma04/egaku/releases), or build it
+yourself:
+
 ```bash
 cargo run --release              # empty canvas
 cargo run --release -- art.ora   # open a file
 ```
 
 On Linux you need the usual desktop libraries: Wayland or X11,
-`libxkbcommon-x11`, and a Vulkan or GL driver.
+`libxkbcommon-x11`, and a Vulkan or GL driver. The macOS build isn't
+notarized, so the first time, right-click the app and choose *Open*.
 
 ## What it does
 
 **Painting.** Pressure-sensitive brush and eraser with presets (pen, ink,
 pencil, marker, airbrush, calligraphy, chalk, foliage, mouse ink), a
 stabiliser, fill with gap closing, linear and radial gradients. The brush
-editor (`F5`) shapes the tip (roundness, angle, turning with the stroke),
-its scatter and paper grain, entry taper and thinning with speed, with a
+editor (`F5`) shapes the tip (round, square or any image, from a file or
+the canvas selection; roundness, angle, turning with the stroke), its
+scatter and paper grain, entry taper and thinning with speed, with a
 scratch pad to try changes on the spot. The pressure curve can be fitted
 to your hand from a few test strokes, and your own brushes are kept in a
 library. True pen pressure and the pen's eraser end work on
 Windows (Ink), Wayland and macOS.
 
-**Layers.** Groups, clipping masks, twelve blend modes, opacity, alpha
+**Layers.** Groups, clipping masks, all 27 of Photoshop's blend modes
+(Dissolve, the burns and dodges, Vivid/Linear/Pin Light, Hard Mix,
+Subtract, Divide, Hue, Saturation…) plus Pass Through groups, opacity, alpha
 lock, merge, and drag-and-drop reordering into and out of groups.
 Ctrl- and Shift-click select several layers, and deleting, duplicating,
 grouping, merging, reordering, changing properties, moving and
@@ -63,10 +72,13 @@ profiles (Display P3, Adobe RGB…) are converted to sRGB on import, so they
 look as they did in the viewer they came from. Exports PNG (tagged sRGB),
 JPEG and WebP.
 
-**Pixel art.** A pixel brush (aliased, gap-free, with pixel-perfect
-corners), a pixel grid at high zoom, an optional tile grid, nearest-neighbour
-transforms and resizing, a palette, and exports scaled up by 2×, 4× or 8×
-with crisp pixels.
+**Pixel art.** Pixel mode turns off antialiasing and nothing else: every
+brush setting and tip shape still works, aliased, gap-free and with
+pixel-perfect corners, and fractional sizes choose between pixel shapes
+(2.8 px is a plus, 3 px a square); the cursor outlines the exact pixels a
+dab will cover. There's also a pixel grid at high zoom, an optional tile
+grid, nearest-neighbour transforms and resizing, a palette, and exports
+scaled up by 2×, 4× or 8× with crisp pixels.
 
 **Animation.** A timeline of frames with onion skinning, playback at a
 chosen frame rate, frames that can be added blank or duplicated, reordered
@@ -92,6 +104,7 @@ shows its shortcut. `F1` lists all of them. The ones worth learning first:
 | `Ctrl+T` · `Enter` · `Esc` | Free transform · apply · cancel |
 | `Ctrl+A` `Ctrl+D` · `Shift`/`Alt` | Select all, deselect · add/subtract |
 | `Ctrl+G` · `Ctrl+Alt+G` · `Ctrl+J` | Group · clip to layer below · duplicate |
+| `Shift+Plus` `Shift+Minus` | Next / previous blend mode |
 | `P` · `,` `.` | Play · previous/next frame |
 | `Tab` | Hide the panels |
 
@@ -140,8 +153,13 @@ mask. Flow sets how much each dab adds, and opacity caps the total (the
 Photoshop model). The mask is applied to the layer once, when the stroke
 ends. Low-flow airbrushing builds up smoothly instead of banding the way
 repeated 8-bit blending does, and each stroke becomes one cheap undo step.
-Pixel mode stamps aliased squares on whole pixels and drops the doubled
-corner pixels of 1px lines, as Aseprite's pixel-perfect mode does.
+Pixel mode only changes how a dab meets the pixel grid: it is centred on
+a pixel (odd widths) or a pixel corner (even ones), each pixel is either
+inside the tip or not, and the doubled corner pixels of 1px lines are
+dropped, as Aseprite's pixel-perfect mode does. Image tips are kept in a
+registry keyed by a hash of their pixels, with a mip pyramid each, so
+brush settings stay small plain values and big tips don't sparkle when
+used small.
 
 **Resampling keeps the original.** Transforms, image objects and resizing
 all go through one resampler that samples from a lazily built mip pyramid,
@@ -204,6 +222,16 @@ writes the document in the screenshot above.
   compositor, selections, resampling, text and image objects, filters,
   undo, animation and file formats. No GUI, unit-tested.
 - `crates/egaku`: the desktop app (eframe/egui on wgpu).
+- `packaging`: icons, the Linux desktop entry and the macOS bundle
+  manifest used by the release workflow.
+
+## Releases
+
+Pushing a tag like `v0.2.0` runs `.github/workflows/release.yml`, which
+builds a portable Windows `.exe` (and `.zip`), a universal macOS `.app` in
+a `.dmg`, and a Linux `.AppImage` and `.tar.gz`, then publishes them with
+checksums as a GitHub release. Running the workflow by hand from the
+Actions tab builds the same packages as artifacts without publishing.
 
 ## Not yet
 
